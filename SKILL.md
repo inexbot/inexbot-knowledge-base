@@ -49,15 +49,15 @@ metadata:
 - "焊接工艺的起弧渐变怎么设置" → 提取「焊接工艺」「起弧渐变」
 - "工具手标定有几种方法" → 提取「工具手标定」「方法」
 
-### 第 2 步：本地检索（优先使用 retrieve.py）
+### 第 2 步：本地检索（retrieve.py）
 
-使用官方检索脚本（推荐方式，调用 jieba 分词 + 多字段加权检索）：
+使用官方检索脚本，调用 jieba 分词 + 多字段加权检索：
 
 ```bash
 python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/retrieve.py "<用户问题>" [top_k]
 ```
 
-**输出格式**：stdout 输出最相关的 1 条检索结果（标题 + 链接 + 正文摘要，最多 1000 字），无结果时退出码 1。
+**输出格式**：stdout 输出 top_k 条检索结果（默认 3 条），每条包含标题 / 链接 / 简介 / 摘要 / 图片列表，无结果时退出码 1。
 
 **调用示例**：
 ```bash
@@ -68,7 +68,7 @@ python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/retrieve.py
 
 > ⚠️ **不要在 Hermes Agent 对话中直接说"我来查知识库"然后调用 search_files**。如果需要让 LLM 使用检索结果回答（而不是 LLM 自己再调用工具搜索），应将检索结果通过 system prompt 注入，并明确告知 LLM 不要调用搜索工具。
 
-### 第 3 步：注入 RAG 上下文（让 LLM 直接使用，而非再次搜索）
+### 第 3 步：注入 RAG 上下文
 
 将检索结果注入 system prompt 时，**必须明确禁止 LLM 调用搜索工具**，否则 LLM 会忽略注入的上下文而自行调用 `search_files` / `read_file`，导致工具调用循环和回答偏离注入内容。
 
@@ -76,17 +76,24 @@ python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/retrieve.py
 ```
 以下是从官方知识库检索到的相关内容，请直接基于这些内容回答用户问题（不要重复调用搜索工具）：
 
+=== 检索结果 1 ===
 标题：xxx
 链接：https://doc.inexbot.com/xxx
 简介：xxx
+摘要：xxx
+图片：
+  - [alt文字] https://doc.inexbot.com/assets/xxx.png
 
-<检索到的正文内容>
+=== 检索结果 2 ===
+...
 
 ---
 回答要求：
 1. 直接用上面的知识库内容回答，不要调用任何搜索或读取文件的工具
 2. 如果知识库内容不足，则基于你自己的知识补充说明
-3. 适当使用 Markdown 格式来组织回答
+3. 回答中涉及的每篇文档都要在末尾列出原文链接，格式为：📄 原文：标题 | 链接
+4. 如果检索结果中有图片，适当引用图片 URL，用文字说明配图位置
+5. 适当使用 Markdown 格式来组织回答
 ```
 
 **判断标准**：检索结果丰富且直接相关时 → 用上述强约束格式；检索结果贫乏或无关时 → 降级为普通问答，不注入上下文。
@@ -95,11 +102,16 @@ python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/retrieve.py
 
 从检索到的内容中提取答案，用自己的语言重新组织表达，不要生硬地堆砌原文。保持自然、流畅、有条理的口吻，符合纳博特技术文档的专业性。
 
-格式：
+格式要求：
 ```
-{用自己的话整理的答案}
+{用自己的话整理的答案，包含从多篇文档中提取的信息}
 
-📄 原文：{标题} | {BASE_URL}{path}
+📄 原文：
+  - 标题A | https://doc.inexbot.com/pathA
+  - 标题B | https://doc.inexbot.com/pathB
+
+📷 配图：
+  - [alt文字] https://doc.inexbot.com/assets/xxx.png
 ```
 
 示例（对比）：
@@ -108,15 +120,45 @@ python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/retrieve.py
 > 根据纳博特知识库「工具手标定手册」：
 > 工具手标定有6点法、7点法、12点法、15点法、20点法四种方法...
 
-✅ 自然语言重组：
+✅ 自然语言重组（多文档 + 链接全列出）：
 > 工具手标定支持多种精度方案：
 > - **6点法**：适合6轴标准机器人，精度最好
 > - **7点法**：适合A/B轴机器人，轴向精度更优
 > - **12/15/20点法**：用于校准零点，适用于特殊机型
 >
-> 标定时会用到TOOL_NUM指令选择对应方法，具体操作在示教器「工具手标定」界面完成。
+> 标定时会用到TOOL_NUM指令选择对应方法，具体操作在示教器「工具手标定」界面完成。（配图：示教器标定界面 https://doc.inexbot.com/assets/image53.BAtIAaUt.png）
+>
+> 如果精度要求更高，可以了解纳博特的自动标定系统 NexAutoCali，集成激光跟踪仪实现全流程自动化。
 
-📄 原文：工具手标定手册 | https://doc.inexbot.com/操作手册/24.03版本/工具手标定手册
+📄 原文：
+  - 工具手标定手册 | https://doc.inexbot.com/操作手册/24.03版本/工具手标定手册
+  - 1 工具坐标系定义 | https://doc.inexbot.com/操作手册/22.07版本/工具手标定手册
+  - 机器人自动标定系统 NexAutoCali | https://doc.inexbot.com/产品资料/精度标定/自动标定系统NexAutoCali
+
+## 问题收集
+
+每次收到用户问题时，自动记录到本地文件，用于分析和优化知识库覆盖。
+
+**记录文件**：`~/.hermes/kb/inexbot/questions.log`
+
+**记录格式**（每行一条 JSON）：
+```json
+{"time": "2026-05-08 16:30:00", "question": "工具手标定有几种方法"}
+```
+
+**实现方式**：由 hermes-skill-proxy 在转发请求时拦截并写入，skill 本身无需额外操作。
+
+> 📌 **架构说明**：Skill（SKILL.md）是纯文本指令，LLM 加载后无法回头调用执行代码。实际拦截请求、写文件、发 HTTP 等操作必须在 proxy 层（hermes-skill-proxy.py）做。不要在 skill 里找"在哪里加代码"——要在 proxy 脚本里加，skill 只负责描述行为和说明。
+
+**查看最近记录**：
+```bash
+tail -20 ~/.hermes/kb/inexbot/questions.log
+```
+
+**统计问题频率**：
+```bash
+cat ~/.hermes/kb/inexbot/questions.log | jq -r .question | sort | uniq -c | sort -nr | head -20
+```
 
 ## 爬虫说明
 
