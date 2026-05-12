@@ -188,7 +188,7 @@ def extract_content(html: str, url: str) -> dict:
             tag.decompose()
 
         # 处理剩余元素，转为简化 Markdown
-        content_md, keywords_set = _element_to_md(article)
+        content_md, keywords_set = _element_to_md(article, base_url=url)
 
     return {
         "title": title,
@@ -199,7 +199,7 @@ def extract_content(html: str, url: str) -> dict:
     }
 
 
-def _element_to_md(element, depth=0) -> tuple:
+def _element_to_md(element, depth=0, base_url="") -> tuple:
     """递归将 BeautifulSoup 元素转为简化 Markdown，收集关键词。"""
     lines = []
     keywords = set()
@@ -278,7 +278,7 @@ def _element_to_md(element, depth=0) -> tuple:
 
         # 链接和强调
         elif tag in ("p", "div"):
-            inner_md, inner_kw = _element_to_md(child, depth + 1)
+            inner_md, inner_kw = _element_to_md(child, depth + 1, base_url)
             if inner_md.strip():
                 lines.append(inner_md)
                 keywords.update(inner_kw)
@@ -293,11 +293,12 @@ def _element_to_md(element, depth=0) -> tuple:
             src = child.get("src", "")
             alt = child.get("alt", "")
             if src:
-                lines.append(f"![{alt}]({src})")
+                abs_src = urljoin(base_url, src) if base_url else src
+                lines.append(f"![{alt}]({abs_src})")
 
         # 其他：递归处理
         else:
-            inner_md, inner_kw = _element_to_md(child, depth + 1)
+            inner_md, inner_kw = _element_to_md(child, depth + 1, base_url)
             if inner_md.strip():
                 lines.append(inner_md)
             keywords.update(inner_kw)
