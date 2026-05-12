@@ -318,7 +318,7 @@ def build_search_index(pages: list) -> dict:
         path = page["path"]
         title = page.get("title", "")
         desc  = page.get("description", "")
-        content = page.get("content_md", "")[:500]  # 截取前500字作摘要
+        content = page.get("content_md", "")[:1000]  # 前1000字作摘要，给 LLM 更多上下文
 
         # 用 jieba 对标题+描述+内容分词，收集关键词
         full_text = f"{title} {desc} {content}"
@@ -331,7 +331,7 @@ def build_search_index(pages: list) -> dict:
             "title": title,
             "description": desc,
             "path": path,
-            "content_snippet": content[:300],
+            "content_snippet": content[:800],
             "keywords": list(word_counts.keys())[:50],  # 保留 top50 关键词
             "word_counts": word_counts,
         }
