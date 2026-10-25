@@ -63,20 +63,47 @@ def search_index(index: dict, query: str, top_k: int = 3) -> list:
     ranked = sorted(scores.items(), key=lambda x: -x[1])[:top_k]
     return [index[path] for path, _ in ranked]
 
+
 def slugify_path(path: str) -> str:
     """把 URL path 转为 md 文件名（/ → -）"""
     return path.lstrip("/").replace("/", "-")
 
+
+def md_candidates(path: str) -> list:
+    """
+    列出可能命中的 md 文件名候选（按优先级）。
+
+    ⚠️ index.json 的 key 是 **percent 编码**的（/zh/%E4%BA%A7...），
+    而 crawler 的 slugify() 会先 unquote 再把 / 换成 -，
+    所以真实文件名是「解码后 + /→-」，不是原始编码态。
+    旧实现只试了原始态和 quote() 态 → 绝大多数页面找不到 md，
+    导致 extract_images_from_md() 永远返回 []（附图全部丢失）。
+    """
+    raw = path.lstrip("/")
+    cands = [
+        raw.replace("/", "-"),
+        urllib.parse.unquote(raw).replace("/", "-"),
+        urllib.parse.quote(raw, safe=""),
+    ]
+    out = []
+    for c in cands:
+        if c not in out:
+            out.append(c)
+    return out
+
+
 def extract_images_from_md(path: str) -> list:
     """从本地 Markdown 文件中提取图片 URL"""
-    # 尝试原始 path
-    md_path = KB_ROOT / "md" / f"{path.lstrip('/')}.md"
-    if not md_path.exists():
-        # 尝试 slugify 后的文件名（/ 替换为 -）
-        md_path = KB_ROOT / "md" / f"{slugify_path(path)}.md"
-    if not md_path.exists():
-        md_path = KB_ROOT / "md" / f"{urllib.parse.quote(path.lstrip('/'))}.md"
-    if not md_path.exists():
+    md_path = None
+    for cand in md_candidates(path):
+        p = KB_ROOT / "md" / f"{cand}.md"
+        try:
+            if p.exists():
+                md_path = p
+                break
+        except OSError:
+            continue
+    if md_path is None:
         return []
 
     with open(md_path, encoding="utf-8") as f:

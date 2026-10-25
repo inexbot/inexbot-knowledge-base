@@ -1,14 +1,14 @@
 ---
 name: inexbot-knowledge-base
 description: "纳博特科技知识库 RAG：每天定时爬取 doc.inexbot.com，由 hermes-skill-proxy 在请求时进行内存检索并注入 system prompt。"
-version: 2.0.0
+version: 2.4.0
 author: Hermes Agent
 license: MIT
 metadata:
   hermes:
     tags: [knowledge-base, rag, inexbot, robot, crawler]
     category: productivity
-    related_skills: []
+    related_skills: ["inexbot-open-knowledge-base"]
 ---
 
 # 纳博特科技知识库（RAG）
@@ -32,11 +32,15 @@ metadata:
 |------|-----|
 | 源站 | https://doc.inexbot.com |
 | 内容 | 纳博特控制器/示教器/工艺/通讯等技术文档 |
-| 页面总数 | ~126 篇 |
+| 页面总数 | **558** 篇（中文站点，2026-10-23 确认；557 → 558 后连续持平） |
 | 存储路径 | `~/.hermes/kb/inexbot/` |
 | 索引文件 | `~/.hermes/kb/inexbot/index.json` |
 | Markdown | `~/.hermes/kb/inexbot/md/` |
+| 原始 HTML | `~/.hermes/kb/inexbot/raw/`（558 个，供 `rebuild_from_cache.py` 复用） |
+| 状态快照 | `~/.hermes/kb/inexbot/.crawl_state.json`（探针写的基线，用于字节级 diff） |
 | BASE_URL | `https://doc.inexbot.com` |
+
+**姊妹 KB** `inexbot-open`（open.inexbot.com）：**799** 篇，详见姊妹 skill。
 
 ## Proxy 检索逻辑
 
@@ -57,19 +61,17 @@ hermes-skill-proxy 启动时将 `index.json` 加载到内存，之后每 5 小�
 
 ```
 【知识库检索结果】
-以下是从纳博特文档库中检索到的 N 篇相关内容：
-
 --- 文档 1 ---
 标题：xxx
 链接：https://doc.inexbot.com/xxx
 简介：xxx
-正文摘要：xxx
+正文：xxx（上限 6000 字符）
 
 【回答要求】
-1. 直接基于上面检索到的知识库内容回答，不要凭记忆猜测
-2. 如果检索内容足以回答问题，给出完整答案；覆盖不足时说明并给出部分答案
-3. 答案末尾必须列出所有引用过的文档链接，格式为：📄 原文：标题 | 链接
-4. 使用简洁专业的技术语言，适当使用 Markdown 格式
+1. 综合所有文档的内容回答，不要只选某几篇，每篇都可能有用户需要的答案
+2. 给出完整详细的技术回答；如果文档没有覆盖到用户问题的某方面，诚实说明
+3. 答案末尾必须列出所有引用过的文档链接，用 Markdown 超链接格式：[标题](链接)
+4. 使用简洁专业的技术语言，适当使用 Markdown 表格/列表来组织回答
 ```
 
 ## 爬虫说明
@@ -86,6 +88,49 @@ python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/crawler.py
 python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/crawler.py --force  # 强制重爬
 ```
 
+> **注意**：KB 内容输出到 `~/.hermes/kb/inexbot/`（在 repo 外部），更新 skill 代码时无需 stash，直接 `git pull` 即可。
+
+### 配套脚本
+
+| 脚本 | 用途 |
+|---|---|
+| `scripts/crawler.py` | 主爬虫（sitemap 发现 + 增量缓存） |
+| `scripts/retrieve.py` | 离线检索兜底（proxy 注入不够用时） |
+| `scripts/check_crawl_state.py` | 状态探针：索引健康度 + 字节级 diff + **上游漂移抽样** |
+| `scripts/rebuild_from_cache.py` | 改清洗逻辑后，从 `raw/` 缓存重建 md + index（不联网） |
+| `scripts/refresh_drift.py` | **全量漂移刷新**：重抓全部页面，只覆盖真变了的内容（2026-10-24 新增） |
+
+**改了 `crawler.py` 的 `slugify()` 或清洗逻辑后**，不要直接 `--force`（会清空 raw 缓存、
+重抓 558 页），用 `rebuild_from_cache.py` 即可。之后跑 `check_crawl_state.py` 验证。
+
+### `refresh_drift.py` —— 日常维护的推荐入口
+
+`crawler.py` 是增量的，「558/558 成功」不代表上游没变；`crawler.py --force` 能发现漂移，
+但它会 `rmtree` 掉整个 `raw/`（247MB / 558 页），重抓期间缓存全空，中途网络失败就会丢页。
+
+`refresh_drift.py` 取两者之长：
+
+```bash
+python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/refresh_drift.py
+python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/refresh_drift.py --dry-run  # 只报告差异
+```
+
+- 重新抓取**全部** 558 页 → 能发现所有上游漂移（不只是抽样的 25 页）
+- **只在内容真的变了时**才覆盖本地 `raw/` + `md/` → 缓存始终完整
+- 抓取失败的页面**保留旧缓存**并计入 failed，不会静默丢页
+- 自动清理 sitemap 里已下线页面的孤儿 md/raw
+- 复用 `crawler.extract_content()` / `slugify()` / `build_search_index()`，不复制清洗逻辑
+- 分类：`SAME` / `IMG_ONLY`（仅 VitePress 图片 hash 变化，不算漂移）/ `CONTENT` / `NEW`
+- 退出码：0 = 正常，1 = 有抓取失败或正文变更
+
+> 耗时约 5 分钟（558 页 / 6 并发）。日常 cron 只跑 `crawler.py` 即可；
+> 发现 `check_crawl_state.py` 报 `CONTENT-DRIFT` 时再跑这个。
+
+
+### 更新工作流
+
+与 `inexbot-open-knowledge-base` 同步更新时，见该 skill 的「更新工作流」章节。
+
 ## 问题日志
 
 每次收到用户问题时自动记录到 `~/.hermes/kb/inexbot/questions.log`。
@@ -93,3 +138,258 @@ python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/crawler.py 
 ```bash
 tail -20 ~/.hermes/kb/inexbot/questions.log
 ```
+
+## proxy 注入不够用时的检索兜底
+
+proxy 自动注入 system prompt 的检索结果是**摘要级**的（content_snippet 通常被截到 3000–6000 字符）。当出现以下情况时，必须主动检索：
+
+1. 用户问题非常具体（如精确报警码 `0x0051`、精确参数名），需要原文细节
+2. proxy 注入的「正文」只有一两句话，明显是占位（很多「伺服报错」页正文就是一行描述）
+3. 用户要求列出全部相关文档、或者要看附图、原始链接
+
+**首选：`scripts/retrieve.py`**
+
+```bash
+python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/retrieve.py "0x0051 IPM故障" 5
+```
+
+它复刻了 proxy 的同款 jieba 加权检索（标题×4 / 描述×2 / 正文×0.5），输出 title、URL、简介、摘要、外链图片。
+
+> **陷阱：query 必须整句加引号作为单个 argv 项。** 脚本是 `query = sys.argv[1]; top_k = int(sys.argv[2])`，不做任何 argv 拼接。把问题按空格拆成多个 token（`输出IO 组号 DOUT 5`）会让 `sys.argv[2]` 变成 `组号`，`int()` 直接抛 `ValueError`。正确写法：`retrieve.py "输出IO 组号 DOUT" 5`。
+
+**次选：直接读磁盘**
+
+```python
+import json
+from pathlib import Path
+idx = json.loads(Path.home().joinpath(".hermes/kb/inexbot/index.json").read_text(encoding="utf-8"))
+# index 的 key 是 URL path（以 / 开头），value 包含 title / description / path / content_snippet / keywords
+md_root = Path.home() / ".hermes/kb/inexbot/md"
+# ⚠️ md 文件名规则不是嵌套目录，而是把 URL path 的所有 / 替换成 -：
+#   /常见问题/伺服报错/久同/0x0051 - 久同
+#   → ~/.hermes/kb/inexbot/md/常见问题-伺服报错-久同-0x0051 - 久同.md
+```
+
+doc.inexbot.com 上很多「常见问题/伺服报错」系列的页面就是 1–2 行占位正文，遇到这种情况：
+
+- 明确告诉用户「知识库中此页正文过短」
+- 给出 page URL（便于他们去咨询纳博特技术支持）
+- 用通用伺服领域知识补充建议（不要瞎编纳博特专有参数）
+
+## 用户给文件名/PDF 标题时的查找流程
+
+当用户说的是「一个文档标题 / PDF 文件名」而不是一个语义问题时（例：`user manual — register data communication.pdf`），proxy 的 jieba 检索经常不命中——标题跨语种、跨翻译版本差异大。完整工作流见 `references/doc-title-lookup-playbook.md`（覆盖中英文件名反查、index.json 标题包含匹配、raw/ HTML 反查、回复模板）。
+
+控制器各型号的接口/硬件规格速查（C1102 / C1103 / C1201 / C2200 的 CPU、网口、串口、DI/DO、断电保护等）见 `references/controller-interface-specs.md`。**注意该文件里 C1200 一节标注为「未核对」**——KB 没有 C1200 独立产品资料文档，早前记录的数值疑似 C1201 规格串位，引用前必须先向纳博特索取 C1200 规格书。同理，**C1102 的 DI/DO 数量与板载 CAN 路数在官方产品资料中未列出**，不可套用 C1201 的 16DI/16DO/2×CAN。
+
+## 大族检索（几百条同类别条目分库存放时）
+
+当某个类别在 KB 里有几十到几百条、且**按子品牌/子型号分库**存放时（先例：伺服报错 339 条，按系统问题/清能德创/久同/迈信/摩通/禾川/新时达/杰美康 分库），proxy 的 top-5 必然覆盖不全。导航方法见 `references/large-family-kb-navigation.md`。
+
+> **建全量索引的省时做法**：几百条同族条目的 H1 标题就是「码 - 含义」，**扫一遍标题**（一次 `glob` + 正则）就能建出完整对照表，比逐条 `read_file` 少几百次工具往返。
+>
+> **批量生成官方引用链接**：`index.json` 的 key 就是 percent-encoded URL path，value.title 是干净标题 → `"https://doc.inexbot.com" + key` 直接得到可点击链接（见 `references/large-family-kb-navigation.md` §6.2）。
+
+> **⚠️ 工具陷阱（本次实测）**：`search_files(pattern="报警|故障码", path=<md_root>, target="files")` 对中文 KB 正文返回 **total_count: 0**，而目录里明明有几百篇含"报警"的文档——该参数不匹配中文正文内容，**返回 0 不等于 KB 没有**。按内容找关键词要用 `terminal` 跑 `grep -rn`；按文件名找用 `search_files(pattern="*报警*", target="files")`（glob 走文件名，有效）。
+>
+> 同码多义陷阱：同一码可能有 `_2.md` 变体（如 `0x0014 - 久同.md` 与 `0x0014 - 久同_2.md`），必须全读。
+
+## 长手册型主题（整本操作手册 300–800 行）
+
+另一类主题不是「几百条散页」而是「**一本厚手册**」（例：冲压工艺 2.0 手册 636 行、3.0 手册 330 行、JSON 协议工艺章 2183 行）。这类**不能靠 proxy 注入的 snippet**（上限 ~4000 字符）拼出来，必须读 md 全文。
+
+**标准取数路线**（见 `references/large-family-kb-navigation.md` §7）：
+1. **一次扫 `index.json` 的 `value.title`** → 列出该主题的全部页面 + 官方链接 + md 位置（比逐个 read_file 试错快一个数量级）。
+2. `wc -l` 确认体量 → 分段 `read_file(offset=…, limit=…)` 或 `sed -n 'a,bp'`。
+3. **多代手册并存**（代次常只在标题末尾，如「冲压工艺2.0手册」/「冲压工艺3.0手册」）：按 title 包含匹配一次列全 → 回答开头先声明有哪几代、参数名不同 → 再按代次分节。
+4. **版本边界自己核**：扫 index 标题就知道某手册只存在于哪个固件版本（例：冲压工艺手册只有 22.07 的 2.0/3.0 两册，24.03/25.01 未收录）→ 别在别的版本上类推参数名，答案末尾写「其他版本 KB 未收录 → 无法确认」。
+
+## 常见陷阱
+
+### ⚠️ 引用链接双重编码 → 所有 cite 链接 404（2026-10-25 已修）
+
+**症状**：知识库检索正常、正文能注入，但回答末尾的**引用链接全部打不开**。
+proxy 注入的「链接：」和「引用清单」里是 `%25E6%2593%258D` 这种**双重 percent 编码**。
+
+**根因**：`index.json` 的 key 在两个 KB 里编码形态**相反**：
+
+| KB | index key 形态 | 例子 | 正确做法 |
+|---|---|---|---|
+| `inexbot`（doc.inexbot.com） | **已 percent 编码** | `/zh/%E6%8A%80%E6%9C%AF%E8%B5%84%E6%96%99` | 保留既有 `%XX`，只编码其余字符 → `quote(path, safe="/%")` |
+| `inexbot-open`（open.inexbot.com） | **明文中文** | `/zh/04.上位机/01.C++/` | 整体编码 → `quote(path, safe="/")` |
+
+旧代码对两者都用 `quote(path, safe="/")`：`%` → `%25`，导致 inexbot 的链接全部 404
+（实测 12 条抽样只有 1 条侥幸命中，因为它本来就不含中文）。
+
+**修复**：proxy 新增 `_kb_url(base_url, path)`，按「key 里是否含 `%`」判别编码态。
+
+```python
+if "%" in path:
+    return base_url + url_quote(path, safe="/%")   # 已编码 → 保留 %XX
+return base_url + url_quote(path, safe="/")          # 明文 → 整体编码
+```
+
+> ⚠️ 判据「含 `%`」在本库成立的前提是 **key 里没有裸 `%`**。实测两个 KB 的
+> malformed-%（`%` 后不是两位十六进制）条目数均为 **0**，所以该判据安全。
+> 若将来 crawler 产出含裸 `%` 的 key，需要改成更严格的正则判别。
+
+**验证**（改完务必跑，见 `references/proxy-url-encoding.md`）：
+- 进程内：`search_single_kb()` 拿到的 `url` 里 `%25` 数量应为 **0**
+- 实网：抽样的 `url` 应全部 HTTP 200
+- 端到端：POST `/v1/chat/completions`，从响应里正则捞 `https?://doc.inexbot.com/zh/...`，逐条 curl
+
+> ⚠️ **不要**用「先 `unquote` 再 `quote`」做规范化——`unquote` 会把 key 里的
+> `+` 还原成空格、把 `%26` 还原成 `&`，反而改变语义。保留既有转义才是对的。
+
+### ⚠️ `retrieve.py` 找不到 md 文件 → 附图全部丢失（2026-10-25 已修）
+
+**症状**：`scripts/retrieve.py` 能检索出条目，但「图片：」永远是空的。
+
+**根因**：旧 `extract_images_from_md()` 只试了「原始编码态」和「`quote()` 态」两个文件名，
+而 crawler 的 `slugify()` 实际产出的是「**unquote 后 + `/`→`-`**」的文件名。
+实测 60 个 index 条目里 **59 个找不到 md**（只有不含中文的 `/zh/` 命中）。
+
+**修复**：新增 `md_candidates()`，按 `raw.replace("/","-")` → `unquote(raw).replace("/","-")`
+→ `quote(raw, safe="")` 顺序逐个试。
+
+**修复后覆盖率**：全库 156 个含图 md 文件，**156/156 全部可解析**。
+
+### ⚠️ crawler 与 proxy 的 md slug 契约已断裂（2026-10-23 发现，**已修**）
+
+> 2026-10-23 曾是「最高优先级的已知缺陷 · 未修」。**2026-10-24 实测已修复并验证通过**，
+> 下面保留根因记录，供参考。
+
+crawler 迁到 VitePress v2 alpha 时把 `slugify()` 改成了「`unquote` 解码 + 200 字节截断 +
+MD5 后缀」，而 `hermes-skill-proxy.py` 的 `read_full_content()` 曾停在旧算法
+（`path.lstrip("/").replace("/","-")` 和 `url_quote(...)` 两个候选，**都不含 unquote**）。
+
+后果实测（当时 558 条 index 全量对账）：
+
+| 指标 | 值 |
+|---|---|
+| proxy 两个候选 slug 命中的 md | **1 / 558** |
+| 两个都没找到（正文永远拿不到） | **557 / 558** |
+| 在 `md_path.exists()` 抛 `OSError [Errno 36]` 的路径 | **147** |
+
+- 抛 `OSError` 的 → 冒泡到 `search_single_kb` → **整个 `/v1/chat/completions` 返回 500**
+- 不抛错的 → **静默降级**成 index.json 的 800 字 `content_snippet`，看起来完全正常，
+  但 LLM 拿到的是摘要不是正文，**没有任何报错线索**
+
+**现状**：proxy 侧已改为 `_md_slug_candidates()`（多候选 + `unquote` + try/except 兜底），
+2026-10-24 用 `references/proxy-slug-contract-break.md` 里的方法实测：
+
+- `冲压工艺 手册 参数设置` → 5 条结果全部 `snippet_len=4000`（正文命中，不再是 800）
+- `通讯协议 地址码 Modbus 寄存器` → 顶层命中 `通讯协议与地址码`，`snippet_len=2701`
+- 无 `OSError` 冒泡
+
+> **改了 crawler 的 `slugify()` 仍然必须同步检查三处**：
+> `hermes-skill-proxy.py` 的 `_md_slug_candidates()`、`scripts/retrieve.py`、
+> `scripts/check_crawl_state.py` 里的 `slugify()` 副本。这是隐式契约，两边各自复刻必然漂移。
+>
+> 验证脚本用 **system python** 跑（`/usr/bin/python3`，沙盒 `python3` 没装 flask），
+> 判定标准是 `snippet_len` 远大于 800 —— 全是 800 = 没修好。
+
+### 增量爬虫报「558/558 成功」**不能**证明上游没变
+
+crawler 默认是增量的：`raw/` 和 `md/` 已存在就跳过（日志显示「跳过（已存在）」）。
+所以**上游页面正文被改，全部 558 条仍会显示成功**。想确认上游是否漂移，必须跑探针：
+
+```bash
+python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/check_crawl_state.py
+```
+
+它做三件事：索引健康度对账（index↔md↔raw，有无缺失/孤儿）、`index.json` **字节级** diff
+（区分「docs 数持平但正文被改」和「真稳态」）、**抽样重新抓取做内容级比对**（补上增量爬虫的盲区）。
+verdict 三态：`IDENTICAL`（真稳态）/ `CONTENT-DRIFT`（索引逐字节相同但上游正文已变 → 需 `--force`）/
+`CHANGED: N -> M`。`--quick` 只查索引不联网，`--sample N` 调抽样量。退出码 1 = 有需要重爬的漂移。
+
+2026-10-23 实测：45 页抽样 0 处真实正文变更（唯一差异是 VitePress 资源 hash 重命名，
+探针会自动归类为 `IMG_ONLY` 不算漂移），上游稳态。
+
+### ⚠️ sitemap 里的 URL 是 XML 转义过的，`&amp;` 会导致整页 404（2026-10-24 已修）
+
+**这是本 skill 迄今最隐蔽的 bug**：某个页面能正常抓到，但正文**永久**是空的，
+而且所有表层健康检查（`/health` 返回 `docs=558 loaded=true`、爬虫报「558/558 成功」、
+索引无缺失无孤儿）**全都不报错**。
+
+**根因**：`sitemap.xml` 里的 URL 经过了 XML 转义，「通讯协议&地址码」写作
+`通讯协议&amp;地址码`。crawler 原来直接 `re.findall(r'<loc>([^<]+)</loc>', xml)` 取出来
+就按字面 `&amp;` 去请求 → **404**。
+
+**后果**（实测 1/558 页中招）：
+
+| 项 | 修复前 | 修复后 |
+|---|---|---|
+| HTTP 状态 | 404 | 200 |
+| md 正文 | 38 字节（`# 通讯协议&地址码` + `>Not Found`） | 5435 字节 |
+| 正文长度 | 0 字符 | 2609 字符 |
+| index snippet | 0 字符 | 800 字符 |
+| proxy 检索命中 | 几乎命中不了 | 顶层命中，snippet_len=2701 |
+
+**修复**：`crawler.py` 的 `fetch_vitepress_metadata()` 里对 `<loc>` 结果加 `html.unescape()`：
+
+```python
+from html import unescape
+all_locs = [unescape(u) for u in re.findall(r'<loc>([^<]+)</loc>', xml)]
+```
+
+> **排查这类「空壳页」的通用手法**：`index.json` 里 `content_snippet` 长度为 0 的条目，
+> 就是「抓到了 404 页」的信号。`check_crawl_state.py` 报告的 `snippet<60ch: 132` 里
+> 混着两类 —— 真·占位页（伺服报错系列，正文就一行）和**抓取失败的空壳页**，
+> 要靠 `description == 'Not Found'` 区分。
+
+> ⚠️ 修复后旧文件是孤儿（slug 从 `通讯协议&amp;地址码` 变成 `通讯协议&地址码`），
+> 不会被自动清掉，需要 `refresh_drift.py` 清理（它会删掉 sitemap 里已不存在页面的 md/raw）。
+
+### crawler 清洗的两个坑（2026-10-23 已修）
+
+1. **标题带零宽字符 U+200B**：doc.inexbot.com 的 `<h1>` 普遍带一个 U+200B（编辑器残留），
+   如 `T30 示教器\u200b`。已加 `clean_text()` 清除零宽字符/BOM。
+   ⚠️ **不要用 `[ \t]+ → " "` 压缩空白**——正文含代码块，压缩缩进会破坏代码内容。
+   只去零宽字符 + 行尾空白。
+2. **23 条页面没有 `<h1>` → 空标题**，直接丢掉 proxy 检索的**标题 ×4 权重**。
+   已加兜底链 `og:title → URL 末段 → description`。
+   ⚠️ **URL 末段比 description 更贴题**（`'冲压工艺2.0手册'` vs `'冲压工艺机器人操作与参数设置完整指南'`），
+   且要 `html.unescape()` 处理 URL 里的 `&amp;`。description 兜底时须跳过
+   `'纳博特科技官方知识库'` / `'Not Found'` 这类无信息量值。
+
+修复后**用缓存重建**（不必 `--force`，那会丢掉全部 raw 缓存）：从 `raw/*.html`
+重新 `extract_content()` → 重写 md → 重建 index。见 `scripts/rebuild_from_cache.py`。
+
+### proxy 没有独立的 /search endpoint
+
+只有 `/v1/chat/completions`、`/health`、`/api/feedback`。**不要**尝试 `curl POST /search` ——会返回 404。检索发生在网关请求注入层，外面只能调聊天端点让 proxy 自己跑检索。
+
+### proxy 端口不是 8765
+
+默认端口是 **8643**，不是 8765。如果有旧脚本或笔记记的是 8765，需要修正或检查环境变量 `PROXY_PORT`。
+
+### 爬虫：doc.inexbot.com 已升级到 VitePress v2 alpha
+
+2026-09 起，doc.inexbot.com 切换到 VitePress v2.0.0-alpha.18 + 中文/英文 i18n 路由，爬虫必须适配以下变化：
+
+1. **根路径 `/` 是 client-side JS 跳转页**——根据 `navigator.language` 用 `location.replace` 跳到 `/zh/` 或 `/en/`，HTTP 客户端不会执行 JS，请求 `/` 只拿到 456 字节的跳转 HTML，**没有** `__VP_HASH_MAP__` / `__VP_SITE_DATA__`。必须直接请求 `/zh/`。
+2. **不能从 `__VP_SITE_DATA__.themeConfig.sidebar` 取页面链接**——v2 alpha 把完整 sidebar 配置拆到外部 JS chunk，site_data 里 `themeConfig` 只有 `i18nRouting + search`，sidebar 是空数组。
+3. **页面正文没有 `<article class="page">` / `<main>` 包裹**——`<h1>` / `<h2>` / `<p>` / `<table>` 直接渲染在 body 中。需要从 `<h1>` 开始抓取，止于 `VPDocFooter`。
+4. **页面 URL 用 `.html` 后缀**（如 `/zh/产品资料/控制系统/T30示教器.html`），sitemap 给的 URL 也是带 `.html` 的。
+
+**对策**：crawler.py 改用 `/sitemap.xml` 作为页面发现源（包含全部 1096 个 zh/en URL），只索引中文版以避免重复。
+
+### 爬虫：Linux 文件名长度限制
+
+doc.inexbot.com 常见问题页 URL 可能很长（中文路径 + URL 编码 + 括号 + 后缀），`unquote` 后 slug 仍可能超过 255 字节（Linux 文件名上限），触发 `OSError: File name too long`。**对策**：crawler.py 的 `slugify()` 会先 `urllib.parse.unquote()`，再字节截断 + MD5 后缀（200 字节上限）。**不要**用 URL-encoded 形式做文件名——那会让每次爬取 slug 都不一样（unquote 前后的中文不同），导致增量失效。
+
+### 爬虫：根路径的 JS 重定向 + follow_redirects
+
+即使 `follow_redirects=True`，`httpx` 也不会执行 JavaScript。`doc.inexbot.com` 的根路径跳转是 `location.replace(target)`，server 永远返回那个 456 字节的跳转页，**不是** HTTP 301/302。`Accept-Language` header 不会触发跳转。直接请求 `/zh/` 或 `/en/` 是唯一办法。
+
+### 爬虫又出现 0 页时的快速诊断清单
+
+爬虫报 `成功: 0 / 0` 时按这个顺序排除（每步对应一段命令）：
+
+1. **首页是不是 JS 跳转？** `curl -sI https://doc.inexbot.com/ | head -1` 看返回 200 + 长度 < 1KB + 含 `location.replace` → 走 v2 alpha 模板。
+2. **site_data 里有 sidebar 吗？** 直接访问 `/zh/` 后正则抓 `__VP_SITE_DATA__`，看 `themeConfig.sidebar` 长度。v2 alpha = `0`；i18n 旧版 = 顶层 0 但 `locales.*` 里有（见 `inexbot-open-knowledge-base/references/vitepress-i18n-sidebar-diagnosis.md`）。
+3. **sitemap.xml 能用吗？** `curl -sI https://doc.inexbot.com/sitemap.xml` 200 → 直接换 sitemap 作为 link 源（crawler.py 已这么干）。
+4. **页面 HTML 有没有 `<article class="page">`？** 没有 → `_element_to_md()` 拿到的是 sidebar/nav 噪声，需要从 `<h1>` 抓取。
+
+完整诊断命令、patch 模板、URL fallback 链、slugify 字节截断细节见 `references/vitepress-v2-alpha-migration.md`。姐妹 skill `inexbot-open-knowledge-base/references/vitepress-i18n-sidebar-diagnosis.md` 是姊妹场景（i18n 但仍是 v1.x）的诊断模板，遇到的不是同款问题不要混用。
