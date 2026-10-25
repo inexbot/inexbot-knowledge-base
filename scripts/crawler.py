@@ -38,6 +38,8 @@ from bs4 import BeautifulSoup
 # ── 配置 ────────────────────────────────────────────────────────────────────
 
 BASE_URL = "https://doc.inexbot.com"
+ZH_URL   = f"{BASE_URL}/zh/"  # 直接访问中文站，避开根路径的 client-side 语言跳转
+SITEMAP_URL = f"{BASE_URL}/sitemap.xml"  # 站点总 sitemap（含全部 zh/en 页面 URL）
 KB_ROOT = Path.home() / ".hermes" / "kb" / "inexbot"
 RAW_DIR  = KB_ROOT / "raw"
 MD_DIR   = KB_ROOT / "md"
@@ -62,10 +64,24 @@ PAUSE_MAX  = 0.8
 def log(msg):
     print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-def slugify(text: str) -> str:
-    """把任意文本转成安全文件名（保留中文）"""
+def slugify(text: str, max_len: int = 200) -> str:
+    """
+    把任意文本转成安全文件名（保留中文）。
+
+    Linux 文件名长度限制 255 字节。doc.inexbot.com 常见问题页 URL 可能很长
+    （含 URL 编码 + 中文 + 括号 + 后缀），需要：
+    2. 把 URL 编码转回中文（%XX → 原字符），再 slugify，可大幅缩短
+    3. 仍超长则用 MD5 截断到 max_len，确保唯一且不会超限
+    """
+    from urllib.parse import unquote
+    text = unquote(text)
     text = text.strip().replace("/", "-").replace("\\", "-")
-    return re.sub(r'[<>:"|?*]', '', text)
+    text = re.sub(r'[<>:"\|?*]', '', text)
+    if len(text.encode("utf-8")) > max_len:
+        # 保留前 max_len - 16 字符 + MD5 后缀，保证唯一
+        head = text.encode("utf-8")[:max_len - 16].decode("utf-8", errors="ignore")
+        text = f"{head}-{md5_text(text)}"
+    return text
 
 def md5_text(text: str) -> str:
     return hashlib.md5(text.encode()).hexdigest()[:8]
@@ -88,95 +104,162 @@ def save_yaml(obj, path: Path):
 
 def fetch_vitepress_metadata() -> dict:
     """
-    VitePress 的 .vitepress/config.js 会返回 404 页面，
-    但该 404 页面的 <script id="check-dark-mode"> 之后内嵌了：
-      - __VP_HASH_MAP__  →  文件名→hash 映射
-      - __VP_SITE_DATA__ →  完整侧边栏配置（含所有页面链接）
+    页面发现（按优先级）：
+    1. /sitemap.xml —— 最稳定，包含全部 zh/en 页面 URL
+    2. 首页 /zh/ 的 __VP_HASH_MAP__（备用，确认站点是否变动）
     """
     log("正在获取 VitePress 站点配置...")
-    resp = httpx.get(urljoin(BASE_URL, "/.vitepress/config.js"),
-                     headers=HEADERS, timeout=TIMEOUT, follow_redirects=True)
-    resp.raise_for_status()
-    html = resp.text
+    client = httpx.Client(headers=HEADERS, timeout=TIMEOUT, follow_redirects=True)
 
-    # 提取 __VP_HASH_MAP__
-    hm_match = re.search(
-        r'window\.__VP_HASH_MAP__\s*=\s*JSON\.parse\("((?:[^"\\]|\\.)*)"',
-        html, re.DOTALL
-    )
+    # 1. sitemap
+    links = []
+    try:
+        resp = client.get(SITEMAP_URL)
+        resp.raise_for_status()
+        xml = resp.text
+        # 提取 <loc>…</loc>
+        # ⚠ 必须 html.unescape()：sitemap 里的 URL 是 XML 转义过的，
+        # 例如「通讯协议&地址码」写作 `通讯协议&amp;地址码`。
+        # 不还原就按字面 `&amp;` 去请求 → 404 → 该页永远是 "Not Found" 空壳
+        # （2026-10-24 实测：1/558 页中招，正文 2609 字符全丢）。
+        from html import unescape
+        all_locs = [unescape(u) for u in re.findall(r'<loc>([^<]+)</loc>', xml)]
+        # 只保留中文页（/zh/...），避免重复索引英文版本
+        links = [u for u in all_locs if "/zh/" in u]
+        log(f"  sitemap 发现 {len(all_locs)} 个 URL（中文 {len(links)} 个）")
+    except Exception as e:
+        log(f"  ⚠ sitemap 获取失败: {e}")
+
+    # 2. 备用：访问 /zh/ 拿 hash_map 用于后续验证（但不做 sidebar 解析——VP v2 alpha
+    #    把 sidebar 拆到了外部 JS chunk，site_data 里只有 i18nRouting+search）
+    html = ""
     hash_map = {}
-    if hm_match:
-        raw = hm_match.group(1)
-        # 解 JSON 转义
-        raw = raw.replace('\\"', '"').replace('\\\\', '\\')
-        hash_map = json.loads(raw)
+    try:
+        resp = client.get(ZH_URL)
+        resp.raise_for_status()
+        html = resp.text
+        hm_match = re.search(
+            r'window\.__VP_HASH_MAP__\s*=\s*JSON\.parse\("((?:[^"\\]|\\.)*)"',
+            html, re.DOTALL
+        )
+        if hm_match:
+            raw = hm_match.group(1).replace('\\"', '"').replace('\\\\', '\\')
+            hash_map = json.loads(raw)
+        log(f"  hash_map 共 {len(hash_map)} 个文件 hash")
+    except Exception as e:
+        log(f"  ⚠ /zh/ 获取失败: {e}")
 
-    # 提取 __VP_SITE_DATA__
-    sd_match = re.search(
-        r'window\.__VP_SITE_DATA__\s*=\s*deserializeFunctions\(JSON\.parse\("((?:[^"\\]|\\.)*)"',
-        html, re.DOTALL
-    )
-    sidebar_links = []
-    if sd_match:
-        raw = sd_match.group(1)
-        raw = raw.replace('\\"', '"').replace('\\\\', '\\')
-        site_data = json.loads(raw)
-        # 递归收集所有 sidebar 中的 link
-        def collect_links(items):
-            for item in items:
-                if isinstance(item, dict):
-                    if item.get("link"):
-                        sidebar_links.append(item["link"])
-                    if "items" in item:
-                        collect_links(item["items"])
-        theme_cfg = site_data.get("themeConfig", {})
-        for section in theme_cfg.get("sidebar", []):
-            collect_links(section.get("items", []))
-            # 展开嵌套 items（如 22.07版本 / 24.03版本 的子项）
-            for sub in section.get("items", []):
-                if "items" in sub:
-                    collect_links(sub["items"])
-                # 产品资料下还有二级嵌套
-                for sub2 in sub.get("items", []):
-                    if "items" in sub2:
-                        collect_links(sub2["items"])
+    client.close()
 
-    # 去重，保持顺序
+    # 把 URL 转成相对路径（/zh/...），作为本地文件名 + 索引 key
+    rel_links = []
+    for u in links:
+        m = re.search(r'(/zh/.*?)(?:\.html)?/?$', u)
+        if m:
+            rel_links.append(m.group(1))
+
+    # 去重保持顺序
     seen, unique = set(), []
-    for link in sidebar_links:
-        if link not in seen:
-            seen.add(link)
-            unique.append(link)
+    for l in rel_links:
+        if l not in seen:
+            seen.add(l)
+            unique.append(l)
 
-    log(f"  发现 {len(unique)} 个页面，{len(hash_map)} 个文件 hash")
+    log(f"  最终页面列表: {len(unique)} 条")
     return {"links": unique, "hash_map": hash_map, "html": html}
 
 
 # ── 第2步：提取页面正文 ───────────────────────────────────────────────────────
 
+def clean_text(s: str) -> str:
+    """
+    清洗文本：去掉零宽字符（U+200B 等）和行尾空白。
+
+    doc.inexbot.com 的 <h1> 普遍带一个 U+200B 零宽空格（VitePress 编辑器残留），
+    例如 'T30 示教器\\u200b'。不去掉的话：
+      1. 每个注入给 LLM 的标题末尾都挂一个不可见字符，引用链接显示时带怪字符；
+      2. 标题分词时可能把 '示教器\\u200b' 当成一个整体 token，影响精确匹配。
+    实测 jieba 会把 U+200B 单独切出来（len<2 被过滤），对检索命中影响有限，
+    但对展示和精确匹配仍有干扰 —— 统一清掉更干净。
+
+    注意：只去零宽字符 + 行尾空白，**不压缩内部空格/制表符** ——
+    正文含代码块，压缩缩进会破坏代码内容。
+    """
+    if not s:
+        return ""
+    # 零宽字符（U+200B/200C/200D）+ BOM：直接删除（不是替换成空格，避免把词切开）
+    s = re.sub(r"[​‌‍﻿]", "", s)
+    # NBSP 不换行空格 → 普通空格（中文正文里常出现）
+    s = s.replace("\xa0", " ")
+    # 行尾空白
+    s = "\n".join(line.rstrip() for line in s.split("\n"))
+    return s.strip()
+
+
 def extract_content(html: str, url: str) -> dict:
     """
     从 VitePress 预渲染的 HTML 页面中提取：
     - title（<h1>）
-    - content（<article class="page"> 或 #content-container）
+    - content（<article class="page"> 或 <main> 或 <h1> 后所有内容）
     - 描述（description meta）
+
+    适配 doc.inexbot.com 使用的 VitePress v2 alpha：
+    - 没有 <article class="page">，没有 <main> 包裹
+    - h1/h2/h3 + p + table 直接渲染在 body 中
     """
     soup = BeautifulSoup(html, "html.parser")
 
     # 标题
     h1 = soup.find("h1")
-    title = h1.get_text(strip=True) if h1 else ""
+    title = clean_text(h1.get_text(strip=True)) if h1 else ""
+
+    # 标题兜底：部分页面没有 <h1>（如「行业方案/医疗器械人」「冲压工艺2.0手册」这类
+    # 以内容直接开头的页），此时依次回退 og:title → URL 末段 → description。
+    # 兜底很重要：proxy 检索对标题给 ×4 权重，标题为空等于丢掉 4 倍权重。
+    if not title:
+        og = soup.find("meta", attrs={"property": "og:title"})
+        if og and og.get("content"):
+            title = clean_text(og["content"])
+
+    if not title:
+        # URL 末段就是文档真实名称（如 '冲压工艺2.0手册'），比 description 更贴题
+        from urllib.parse import unquote
+        from html import unescape
+        seg = unquote(url.rstrip("/").split("/")[-1]) if url.rstrip("/") else ""
+        seg = unescape(seg)          # &amp; → &
+        seg = clean_text(seg)
+        # 去掉 .html 后缀和明显的 slug 噪声
+        seg = re.sub(r"\.html?$", "", seg).strip()
+        if seg and not seg.lower().startswith(("readme", "index")):
+            title = seg[:120]
+
+    if not title:
+        desc_tag_tmp = soup.find("meta", attrs={"name": "description"})
+        if desc_tag_tmp and desc_tag_tmp.get("content"):
+            cand = clean_text(desc_tag_tmp["content"])[:120]
+            # 通用描述（如 '纳博特科技官方知识库'）当标题没有信息量，跳过
+            if cand and cand != "纳博特科技官方知识库" and cand.lower() != "not found":
+                title = cand
 
     # 描述
     desc_tag = soup.find("meta", attrs={"name": "description"})
-    description = desc_tag["content"].strip() if desc_tag and desc_tag.get("content") else ""
+    description = clean_text(desc_tag["content"]) if desc_tag and desc_tag.get("content") else ""
 
-    # 正文区域
+    # 正文区域（按优先级寻找）
     article = soup.find("article", class_="page")
     if not article:
-        article = soup.find("div", id="content-container")
+        article = soup.find("main")
     if not article:
-        article = soup.find("main") or soup.find("div", class_="content")
+        # VP v2 alpha: 取 <h1> 的父级（通常是 body 或 VPDoc 容器）
+        if h1:
+            # 往上找到 class 含 VPDoc 的 div，作为正文根
+            parent = h1.parent
+            while parent and parent.name not in ("body", "html"):
+                cls = parent.get("class", []) or []
+                if any("Doc" in c or "doc" in c for c in cls) or parent.name == "main":
+                    break
+                parent = parent.parent
+            article = parent or h1.parent
 
     content_md = ""
     keywords_set = set()
@@ -186,14 +269,35 @@ def extract_content(html: str, url: str) -> dict:
         for tag in article.find_all(["nav", "script", "style", "footer",
                                       "aside", "button", "input"]):
             tag.decompose()
+        # 移除 header-anchor 链接（VP 在每个标题后插的「#」锚点）
+        for tag in article.find_all("a", class_="header-anchor"):
+            tag.decompose()
 
-        # 处理剩余元素，转为简化 Markdown
-        content_md, keywords_set = _element_to_md(article, base_url=url)
+        # 进一步：只取 <h1> 之后的内容（VP v2 alpha 中 article 可能含 sidebar/VPNav）
+        h1_in_article = article.find("h1")
+        if h1_in_article:
+            # 收集从 h1 开始的所有后续兄弟元素
+            captured = [h1_in_article]
+            for sib in h1_in_article.find_next_siblings():
+                captured.append(sib)
+                # 停止条件：碰到 VPDocFooter / pager（翻页栏）就停
+                cls = " ".join(sib.get("class", []) or [])
+                if "VPDocFooter" in cls or sib.name in ("script", "style"):
+                    captured.pop()  # 不含 footer
+                    break
+            # 临时包一层供 _element_to_md 处理
+            from bs4 import Tag
+            wrapper = Tag(name="div")
+            for el in captured:
+                wrapper.append(el.extract() if el.parent else el)
+            content_md, keywords_set = _element_to_md(wrapper, base_url=url)
+        else:
+            content_md, keywords_set = _element_to_md(article, base_url=url)
 
     return {
         "title": title,
         "description": description,
-        "content_md": content_md.strip(),
+        "content_md": clean_text(content_md),
         "url": url,
         "keywords": sorted(keywords_set),
     }
@@ -401,8 +505,9 @@ def crawl():
     total  = len(links)
 
     for i, link in enumerate(links, 1):
-        url = urljoin(BASE_URL, link)
-        slug = slugify(link.lstrip("/"))
+        # link 是相对路径（如 /zh/产品资料/控制系统/T30示教器）；拼成绝对 URL
+        url = urljoin(BASE_URL, link) if not link.startswith("http") else link
+        slug = slugify(link.lstrip("/").rstrip(".html"))
         raw_path = RAW_DIR / f"{slug}.html"
         md_path  = MD_DIR  / f"{slug}.md"
 
@@ -420,11 +525,18 @@ def crawl():
                 pass  # 文件损坏，重新爬
 
         try:
+            # 1. 直接试 link 本身
             resp = client.get(url, follow_redirects=True)
-            if resp.status_code == 404:
-                # VitePress 也可能输出 .md 文件，试试直接访问源
-                md_url = urljoin(BASE_URL, link + ".md")
-                resp = client.get(md_url, follow_redirects=True)
+            # 2. 404 或 SPA fallback 时，尝试 /zh/xxx/index.html 或 /zh/xxx.html
+            if resp.status_code == 404 or len(resp.text) == 147235 and "<title>404" in resp.text:
+                for alt in (link.rstrip("/") + ".html",
+                            link.rstrip("/") + "/index.html",
+                            link.rstrip("/") + ".md"):
+                    alt_url = urljoin(BASE_URL, alt) if not alt.startswith("http") else alt
+                    r2 = client.get(alt_url, follow_redirects=True)
+                    if r2.status_code == 200 and len(r2.text) > 1000 and "<title>404" not in r2.text:
+                        resp = r2
+                        break
 
             html = resp.text
             with open(raw_path, "w", encoding="utf-8") as f:
