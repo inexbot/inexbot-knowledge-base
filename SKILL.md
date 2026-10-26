@@ -99,9 +99,40 @@ python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/crawler.py 
 | `scripts/check_crawl_state.py` | 状态探针：索引健康度 + 字节级 diff + **上游漂移抽样** |
 | `scripts/rebuild_from_cache.py` | 改清洗逻辑后，从 `raw/` 缓存重建 md + index（不联网） |
 | `scripts/refresh_drift.py` | **全量漂移刷新**：重抓全部页面，只覆盖真变了的内容（2026-10-24 新增） |
+| `scripts/verify_kb.py` | **全量回归**：索引完整性 + slug 契约 + 检索链路 + 引用链接实网可达性（2026-10-25 新增） |
 
 **改了 `crawler.py` 的 `slugify()` 或清洗逻辑后**，不要直接 `--force`（会清空 raw 缓存、
 重抓 558 页），用 `rebuild_from_cache.py` 即可。之后跑 `check_crawl_state.py` 验证。
+
+### ⚠️ cron 的交付物是「验证闭环」，不只是「爬虫跑过了」
+
+**「crawler 报 558/558 成功」不是交付物，是起点。** 增量爬虫的「成功」只意味着
+「raw/ 和 md/ 已存在 → 跳过 → 没报错」，它对**上游正文被改 / 引用链接双重编码 /
+md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感**，
+而它们的共同特征是：**所有表层健康检查全绿，但用户拿到的是坏结果**。
+
+**标准 cron 流程（6 步）**：
+
+1. `crawler.py` 爬取
+2. `check_crawl_state.py` 漂移探针 —— 只有 `IDENTICAL` 才算「无变化」
+3. 索引完整性对账（零长度 snippet / `Not Found` / 空标题 / 裸 `%` / slug 契约）
+4. 检索链路实测 —— `content_snippet` 长度判据（>800 正文命中，==800 静默降级）
+5. **引用链接实网可达性**（`/health` 绿灯 ≠ 用户点得到链接）
+6. 修复 → 部署 → 回归
+
+**一键回归**（一次跑完 3/4/5 + proxy 健康检查，两个 KB 都覆盖）：
+
+```bash
+/usr/bin/python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/verify_kb.py
+```
+
+> ⚠️ 必须用 `/usr/bin/python3`（沙盒 `python3` 没装 flask）。
+> 脚本会实网 curl，每个 KB 抽 12 条 URL，耗时约 20–40 秒。
+> 退出码 1 = 有 FAIL，可直接用于 cron 判定。
+
+完整方法论（含「两个 KB 的 cron 并发改同一个 proxy 文件」的互相覆盖风险、
+「工作树里可能有长期未提交的重要改动」的检查清单、报告该怎么写）见
+`references/kb-cron-verification-workflow.md`。
 
 ### `refresh_drift.py` —— 日常维护的推荐入口
 
@@ -205,6 +236,41 @@ doc.inexbot.com 上很多「常见问题/伺服报错」系列的页面就是 1�
 4. **版本边界自己核**：扫 index 标题就知道某手册只存在于哪个固件版本（例：冲压工艺手册只有 22.07 的 2.0/3.0 两册，24.03/25.01 未收录）→ 别在别的版本上类推参数名，答案末尾写「其他版本 KB 未收录 → 无法确认」。
 
 ## 常见陷阱
+
+### ⚠️ 两个 KB 的 cron 会并发改同一个 proxy 文件（2026-10-25 现场）
+
+**这是真实的互相覆盖风险，不是理论问题。**
+
+2026-10-25 现场：改 `hermes-skill-proxy.py` 时，姊妹 KB 的 cron 正在
+`git fetch` / `git pull` 同一个 repo。patch 工具返回了：
+
+```
+_warning: hermes-skill-proxy.py was modified by sibling subagent
+          'f2fb7174-...' but this agent never read it
+```
+
+**对策**：
+1. 动手前 `ps aux | grep -E 'git (pull|push|fetch|merge)|crawler.py'` 看有没有并发作业
+2. **patch 之后、commit 之前**必须 `git diff` 复核，确认对方的改动还在
+   （本次正是靠 `git diff --stat` 发现 sibling 的 `_md_slug_candidates()` 修复没被覆盖）
+3. commit 前再 grep 一次关键函数名，两个 KB 的修复都要在
+4. 姊妹 KB 的 SKILL.md 里有同样的警告，**两边都要遵守**
+
+### ⚠️ 工作树里可能有长期未提交的重要改动
+
+2026-10-25 发现：`crawler.py` 的 VitePress v2 alpha 迁移（sitemap 发现 +
+`slugify()` unquote + MD5 截断 + `html.unescape()`）**一直在工作树里没进版本库**。
+任何人 `git pull` 到旧版都会退回 `config.js` 发现逻辑——那条路在 v2 alpha 上
+**已经失效**（sidebar 整个被拆到外部 JS chunk，site_data 里 `themeConfig.sidebar` 是空数组）。
+
+**cron 收尾时应该顺手检查**：
+
+```bash
+cd <skill repo> && git status -sb
+```
+
+看到 `M scripts/crawler.py` 或一批 `?? references/` / `?? scripts/*.py`，
+说明有重要改动没进版本库 → **提交并推送**，否则下次 pull 会静默回退。
 
 ### ⚠️ 引用链接双重编码 → 所有 cite 链接 404（2026-10-25 已修）
 
