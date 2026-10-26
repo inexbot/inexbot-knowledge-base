@@ -129,6 +129,23 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 > ⚠️ 必须用 `/usr/bin/python3`（沙盒 `python3` 没装 flask）。
 > 脚本会实网 curl，每个 KB 抽 12 条 URL，耗时约 20–40 秒。
 > 退出码 1 = 有 FAIL，可直接用于 cron 判定。
+>
+> **退出码 1 不一定是本 KB 的问题** —— `verify_kb.py` 同时检查两个 KB，姊妹 KB
+> `inexbot-open` 的历史遗留项（1056 个不可达死缓存孤儿 md、34 个分类索引页零长度
+> snippet、760 个标题带零宽字符 U+200B）会让它恒定报 6 项 FAIL。
+> **看失败列表的 `[KB 名]` 前缀分组**（2026-10-26 已给 `verify_kb.py` 加上归属），
+> 只有 `[inexbot]` 分组下的失败才算本 KB 的回归。
+>
+> 姊妹 KB 那 6 项**不影响用户回答**，已实测确认：
+> - 死缓存孤儿 md：proxy 只按 index path 定位 md，孤儿**在架构上不可达**
+> - 零长度 snippet 的 34 条是**分类索引页**（`# \n\n>纳博特科技官方SDK文档`），
+>   实测 top-5 命中次数 **0**
+> - 零宽字符 U+200B：jieba 分词不受影响（实测 760 个受影响标题里，
+>   产出「无干净 token」的为 **0**）
+>
+> 另注：两个 KB 的 cron 都定在 **11:00**，会同时跑。姊妹 KB 若正在跑
+> `regen_md.py` 之类修复脚本，此时 `verify_kb.py` 看到的是**修复中间态**，
+> 不要误判为回归 —— 先 `ps aux | grep -E "crawler.py|regen_md|refresh_drift"` 确认。
 
 完整方法论（含「两个 KB 的 cron 并发改同一个 proxy 文件」的互相覆盖风险、
 「工作树里可能有长期未提交的重要改动」的检查清单、报告该怎么写）见
@@ -236,6 +253,45 @@ doc.inexbot.com 上很多「常见问题/伺服报错」系列的页面就是 1�
 4. **版本边界自己核**：扫 index 标题就知道某手册只存在于哪个固件版本（例：冲压工艺手册只有 22.07 的 2.0/3.0 两册，24.03/25.01 未收录）→ 别在别的版本上类推参数名，答案末尾写「其他版本 KB 未收录 → 无法确认」。
 
 ## 常见陷阱
+
+### ⚠️ `git push` 到 GitHub 会间歇性超时 —— 需要重试（2026-10-26 现场）
+
+**症状**：提交成功但 push 失败，`Failed to connect to github.com port 443 after 129908 ms: Connection timed out`。
+同一台机器上 `curl https://github.com` 报 `Error in the HTTP2 framing layer`，而
+`curl https://api.github.com` 和 `curl https://doc.inexbot.com` 都正常 —— **是 github.com 的
+git 端点不稳定，不是网络断了，也不是 token 失效**。
+
+**判据**：push 报连接超时 ≠ 鉴权失败。鉴权失败是 `403` / `Authentication failed`，
+连接超时是 `Failed to connect`。**前者要换 token，后者只需重试。**
+
+**对策**：直接重试，通常第 2–3 次就成功（2026-10-26 实测第 3 次成功）：
+
+```bash
+for i in 1 2 3 4; do
+  git -c http.version=HTTP/1.1 push origin main && break
+  sleep 5
+done
+```
+
+> ⚠️ 每次失败要等约 130 秒超时，**别在同一条命令里用 `&&` 串联 push 和后续校验** ——
+> 一次失败会拖满 2 分钟。push 与校验要分成独立命令。
+
+### ⚠️ `~/.git-credentials` 里只有 username（token 当用户名用）→ push 要密码
+
+2026-10-26 现场：`~/.git-credentials` 存的是 `https://<TOKEN>@github.com`（token 放在
+**用户名**位置，密码位为空）。此时 `git push` 会报
+`could not read Password for 'https://<TOKEN>@github.com'`。
+
+**修复**：把 credential 补成 `token:token` 形式，之后 push 直接走 credential store：
+
+```python
+# 注意：token 不要 echo 到日志里
+import re, pathlib
+raw = pathlib.Path.home().joinpath(".git-credentials").read_text().strip()
+m = re.match(r"https://([^:@/]+)(?::([^@]*))?@(.+)$", raw)
+token = m.group(2) or m.group(1)
+pathlib.Path.home().joinpath(".git-credentials").write_text(f"https://{token}:{token}@github.com\n")
+```
 
 ### ⚠️ 两个 KB 的 cron 会并发改同一个 proxy 文件（2026-10-25 现场）
 
