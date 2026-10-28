@@ -29,6 +29,46 @@ ls -la ~/.hermes/kb/inexbot/index.json
 
 `index.json` 的 mtime **晚于** proxy 启动时间 → 内存索引已过期，需要重启。
 
+### 更强的判据：直接比对「proxy 内存索引」vs「磁盘 index.json」
+
+mtime 比较是**间接**判据（mtime 新不一定说明内存旧，比如爬虫重写了同样内容）。
+**直接判据**是读 proxy 进程的内存索引跟磁盘文件逐条比对（2026-10-28 新增）：
+
+```python
+import importlib.util, sys, json
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("hsp", "/home/ecs-user/hermes-skill-proxy/hermes-skill-proxy.py")
+mod = importlib.util.module_from_spec(spec)
+sys.modules["hsp"] = mod
+spec.loader.exec_module(mod)
+mod.load_all_indexes()          # ← 必须调用
+
+for kb, path in [("inexbot", ".hermes/kb/inexbot/index.json"),
+                 ("inexbot-open", ".hermes/kb/inexbot-open/index.json")]:
+    disk = json.loads((Path.home()/path).read_text(encoding="utf-8"))
+    mem  = mod._index_data[kb]          # ← proxy 的内存索引
+    dk, mk = set(disk), set(mem)
+    print(kb, "keys only in disk:", len(dk-mk), "| only in mem:", len(mk-dk))
+    diff = sum(1 for k in (dk & mk)
+               if disk[k].get("title") != mem[k].get("title")
+               or disk[k].get("content_snippet") != mem[k].get("content_snippet"))
+    print("  title/snippet 不同的条目:", diff)
+```
+
+- `keys only in disk > 0` 或 `keys only in mem > 0` → **内存索引已过期，必须重启**
+- `title/snippet 不同的条目 > 0` → 内容也过期
+- 全 0 → **内存索引与磁盘逐条一致，无需重启**
+
+> ⚠️ 注意：这段代码在**新进程**里跑，`mod.load_all_indexes()` 读的是
+> **磁盘**文件，不是线上进程的内存 —— 所以它验的是「proxy 代码 + 磁盘」的一致性。
+> 要验**线上进程**的内存，得直接读 `/proc/<pid>` 里的 Python 对象，做不到。
+> **真正要判的是线上进程的启动时间 vs index.json mtime**（上面的 mtime 判据）。
+> 本脚本的价值是：验证「proxy 代码能正确加载当前磁盘索引」+「两个 KB 的 key 集合是否一致」。
+>
+> 2026-10-28 实测：两个 KB 的 key 集合与 title/snippet 全部一致（0 差异），
+> 配合「proxy 启动于 11:08:34、index.json mtime 11:03」的 mtime 判据，
+> 确认线上内存索引为最新。
+
 ## ⚠️ 陷阱 1：journal 里没有重载记录 ≠ 重载没发生（stdout 块缓冲）
 
 **这是本次最容易误判的一点。**
