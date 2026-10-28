@@ -38,6 +38,12 @@ python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/check_crawl
 verdict 三态：`IDENTICAL`（真稳态）/ `CONTENT-DRIFT`（需 `--force` 或 `refresh_drift.py`）/
 `CHANGED: N -> M`。**只有 IDENTICAL 才算「无变化」**。
 
+> ⚠️ **`orphan md > 0`（md/raw 数 > index 条目数，但 index 条目数没变）
+> = 上游把页面搬了目录**（改了 URL 路径），不是内容变更。
+> `crawler.py` 增量爬虫**不会**清理旧 slug → 补跑 `refresh_drift.py`
+> （**唯一会清孤儿的脚本**），**且必须重启 proxy**。
+> 完整流程见 `references/upstream-url-migration.md`。
+
 ### 3. 索引完整性对账（廉价、高价值）
 
 一次 `execute_code` 跑完这几条断言（任一失败都说明有隐藏故障）：
@@ -72,6 +78,32 @@ verdict 三态：`IDENTICAL`（真稳态）/ `CONTENT-DRIFT`（需 `--force` 或
 改动 proxy 代码后：`sudo systemctl restart hermes-skill-proxy`，
 **分两条独立命令**（restart 和 curl 不要链在同一条 `&&` 里，见姊妹 skill 的
 「同一条命令里会假性失败」章节），再跑完整回归。
+
+> ⚠️ 这是**系统级** unit，必须 `sudo -n`（本机免密可用）。
+> 不带 sudo 会报 `Interactive authentication required`。
+> `systemctl --user cat hermes-skill-proxy.service` **返回不了任何东西**
+> —— 它不是 user unit，配置在 `/etc/systemd/system/hermes-skill-proxy.service`。
+> ⚠️ 仓库里的 `hermes-skill-proxy.service` 副本是**旧的**
+> （`User=inexbot`、`WorkingDirectory=/home/inexbot`，该目录根本不存在）——
+> **以 `/etc/systemd/system/` 下的为准**。
+
+### 6b. 什么时候**必须**重启 proxy（不能只等 5h 自动重载）
+
+| 情况 | 要重启？ |
+|---|---|
+| 只是正文改了，URL 路径没变 | 不必须 |
+| **上游改了 URL 路径**（旧 md 被删） | **必须** —— 旧内存索引指向已删文件 → 404 引用链接 |
+| 改了 proxy 代码 | **必须** |
+| 改了 `slugify()` / 清洗逻辑 | **必须** —— md 文件名变了 |
+
+判据：`index.json` 的 mtime **晚于** proxy 启动时间 → 内存索引已过期。
+
+```bash
+ls -la ~/.hermes/kb/inexbot/index.json
+ps -o pid,lstart -p $(pgrep -f hermes-skill-proxy.py | head -1)
+```
+
+细节见 `references/proxy-runtime-freshness.md`。
 
 ## ⚠️ 两个 KB 的 cron 会并发改同一个 proxy 文件
 
@@ -119,6 +151,24 @@ cd <skill repo> && git status -sb
 4. **提醒**（比如「工作树里有未提交的改动，已一并提交」）
 
 坏的报告：把 60 行「跳过（已存在）」日志贴出来。
+
+## ⚠️ 结论要区分「已证实的故障」和「我怀疑的故障」
+
+2026-10-27 现场：看到 journal 里 48 小时没有 proxy 重载记录，
+一度断定「定时重载链断了，线上 48 小时用的是过期索引」。
+深挖后**推翻了** —— systemd 下 stdout 块缓冲，小段输出几十小时不刷进 journal；
+加 `PYTHONUNBUFFERED=1` 实测 10s 间隔重载**完全正常**。
+
+**教训**：
+- 中途的推测**不要**直接写进报告当结论 —— 先做完证伪实验再落笔
+- 补丁本身可以照样打（加固无坏处），但**定性**要改口：
+  「已发生 48 小时不重载」→ 「重载链遇异常会断裂，已加固」
+- 报告里如果写了未经证实的因果，要明确标注是**推测**还是**实测**
+
+判定某个行为「坏了」之前，先确认**观测手段本身**是否可信
+（本次的观测手段 = journal，而 journal 因为缓冲不可信）。
+这跟「增量爬虫报成功不代表上游没变」是同一类错误的两个方向：
+一个是被假绿灯骗了，一个是**被假红灯骗了**。
 
 ## 无变化时也要说点什么
 

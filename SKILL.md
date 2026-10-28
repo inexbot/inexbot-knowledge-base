@@ -1,7 +1,7 @@
 ---
 name: inexbot-knowledge-base
 description: "纳博特科技知识库 RAG：每天定时爬取 doc.inexbot.com，由 hermes-skill-proxy 在请求时进行内存检索并注入 system prompt。"
-version: 2.4.0
+version: 2.5.0
 author: Hermes Agent
 license: MIT
 metadata:
@@ -46,6 +46,15 @@ metadata:
 
 hermes-skill-proxy 启动时将 `index.json` 加载到内存，之后每 5 小时自动重载一次。
 
+> ⚠️ **「每 5 小时自动重载」不是可靠保证**：
+> - 定时重载链遇一次异常就会**永久**断裂（2026-10-27 已修并部署，2026-10-28 确认线上进程已带补丁）
+> - systemd 下 stdout 块缓冲 → **journal 里看不到重载记录不等于没重载**
+> - 上游改 URL 路径时，**旧 md 被删**，内存里的旧索引会指向 404 的旧 URL
+>
+> 所以**上游改 URL 路径、或改了 proxy / `slugify()` 后，必须显式重启**：
+> `sudo -n systemctl restart hermes-skill-proxy.service`
+> 详见 `references/proxy-runtime-freshness.md`。
+
 每次收到用户问题时：
 1. 从 messages 中提取最后一条 user 消息
 2. 用 jieba 分词后，在内存索引中做加权关键词匹配：
@@ -80,6 +89,11 @@ hermes-skill-proxy 启动时将 `index.json` 加载到内存，之后每 5 小�
 
 每天上午 11:00，Hermes 通过 cronjob 自动运行 `crawler.py`，更新 `index.json` 和 `md/` 目录。
 Proxy 下一次 5 小时重载时会自动加载最新索引。
+
+> ⚠️ **但「自动」不可靠**：上游改 URL 路径时旧 md 会被删，proxy 内存里的旧索引
+> 会指向 404 的旧 URL → 这种情况下**必须显式重启 proxy**：
+> `sudo -n systemctl restart hermes-skill-proxy.service`
+> 详见 `references/proxy-runtime-freshness.md`。
 
 ### 手动爬取
 
@@ -120,6 +134,19 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 5. **引用链接实网可达性**（`/health` 绿灯 ≠ 用户点得到链接）
 6. 修复 → 部署 → 回归
 
+> ⚠️ **第 2 步若报 `orphan md > 0`**（md/raw 文件数 > index 条目数，但 index 条目数没变）
+> = **上游把页面搬了目录**（改了 URL 路径），不是内容变更。
+> `crawler.py` 增量爬虫**不会**清理旧 slug → 必须补跑 `refresh_drift.py`（唯一会清孤儿的脚本），
+> **且必须重启 proxy**（旧 md 已删，proxy 内存里的旧索引会指向 404 的旧 URL）。
+> 完整诊断流程见 `references/upstream-url-migration.md`。
+
+> ⚠️ **proxy 的内存索引 ≠ 磁盘上的 `index.json`**。爬虫更新了磁盘文件不等于
+> proxy 用上了新内容（proxy 每 5h 才重载一次）。**上游改 URL 路径时必须重启 proxy**：
+> ```bash
+> sudo -n systemctl restart hermes-skill-proxy.service   # 系统级 unit，必须 sudo
+> ```
+> 判据与「什么时候必须重启」见 `references/proxy-runtime-freshness.md`。
+
 **一键回归**（一次跑完 3/4/5 + proxy 健康检查，两个 KB 都覆盖）：
 
 ```bash
@@ -150,6 +177,14 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 完整方法论（含「两个 KB 的 cron 并发改同一个 proxy 文件」的互相覆盖风险、
 「工作树里可能有长期未提交的重要改动」的检查清单、报告该怎么写）见
 `references/kb-cron-verification-workflow.md`。
+
+**其他相关 reference**：
+
+| 文件 | 覆盖内容 |
+|---|---|
+| `references/proxy-runtime-freshness.md` | proxy 内存索引新鲜度、重启判据、stdout 块缓冲陷阱、重载链断链、进程内检索链路测试 |
+| `references/upstream-url-migration.md` | 上游改 URL 路径的完整诊断流程（sitemap 查新路径 → 404/200 确认 → diff 判搬家 → refresh_drift 清孤儿 → 重启 proxy） |
+| `references/hermes-skill-proxy-deployment.md` | proxy 部署步骤、systemd unit 位置、`User=ecs-user` 等坑 |
 
 ### `refresh_drift.py` —— 日常维护的推荐入口
 
@@ -427,6 +462,90 @@ verdict 三态：`IDENTICAL`（真稳态）/ `CONTENT-DRIFT`（索引逐字节�
 
 2026-10-23 实测：45 页抽样 0 处真实正文变更（唯一差异是 VitePress 资源 hash 重命名，
 探针会自动归类为 `IMG_ONLY` 不算漂移），上游稳态。
+
+### ⚠️ 上游改 URL 路径（页面迁移）→ 孤儿 md + 404 引用链接（2026-10-27 现场）
+
+**信号**：`check_crawl_state.py` 报 `orphan md: 2`，而 index 条目数不变（558 → 558）。
+
+2026-10-27 现场：冲压工艺 2.0/3.0 手册从 `/zh/操作手册/22.07版本/`
+搬到 `/zh/操作手册/专机手册/冲压专机/`。旧 URL **404**、新 URL **200**，
+md 内容**逐字节相同**（纯搬家，非内容变更）。
+
+**必须做的三件事**：
+1. 跑 `refresh_drift.py` 清孤儿（`crawler.py` **不会**清）
+2. **重启 proxy** —— 旧 md 已删，内存里的旧索引会指向 404 的旧 URL
+3. 回归确认新 URL 可达
+
+完整流程见 `references/upstream-url-migration.md`。
+
+> ⚠️ 排查 URL 时**别把中文 URL 直接写进 shell 命令行** —— 会被安全扫描拦下
+> （`[MEDIUM] Non-ASCII characters in URL path: ... homoglyph substitution`），
+> `for u in "中文URL"` 循环同样被拦。用 `urllib.parse.quote(u, safe="/")`
+> 在 Python 里编码后交给 subprocess，编码后全是 ASCII 即可通过。
+
+### ⚠️ journal 里没有重载记录 ≠ proxy 没重载（stdout 块缓冲，2026-10-27 实测）
+
+**systemd 下 Python 的 stdout 是块缓冲**，小段输出会攒在用户态缓冲区，
+直到进程退出或攒满 ~8KB 才刷进 journal。proxy 每次重载只打印约 200 字节
+（`[proxy] Total: 1357 docs across 2 indexes`）→ **journal 里可能几十小时看不到任何重载记录**。
+
+实测证据：`systemd-run` + `StandardOutput=journal` 跑一个「先打印、sleep 45s、再打印」的脚本，
+进程存活期间 journal **一行都没有**；进程结束后两行**同时**出现且时间戳相同。
+
+> ❌ **不要**用「journal 里有没有重载日志」判断重载是否工作。
+> ✅ **stderr 是行缓冲的**（实测立即可见）→ 诊断输出写 stderr。
+> ✅ 加 `PYTHONUNBUFFERED=1` 让 stdout 变行缓冲。
+> ✅ 确判方法：复制 proxy 把 `RELOAD_INTERVAL` 改短（10s）跑几十秒，看 `Total:` 出现几次。
+
+细节与复现命令见 `references/proxy-runtime-freshness.md`。
+
+### ⚠️ proxy 定时重载链会被一次异常**永久**打断（2026-10-27 已修）
+
+`schedule_reload()` 原来长这样：
+
+```python
+def schedule_reload():
+    load_all_indexes()            # ← 抛异常，下面两行永远不执行
+    t = threading.Timer(RELOAD_INTERVAL, schedule_reload)
+    t.daemon = True
+    t.start()
+```
+
+`threading.Timer` 回调抛异常 → 线程死掉 → **不再排下一次** → proxy 永远停在旧索引，
+且**没有任何报错**（异常只打到该线程的 stderr）。
+
+最小复现已验证：把 `load_all_indexes` 换成抛异常的桩，第一次重载后线程数从 2 掉回 1。
+
+**修复**（已应用）：`try/except/finally`，`finally` 里无条件排下一次，
+错误写 `file=sys.stderr, flush=True`（stdout 块缓冲，journal 看不到）。
+⚠️ 记得 `import sys` —— 原文件只 import 了 `os`/`json`/`re`/`time`，**没有 sys**。
+
+**配套修**：`crawler.py` 的 `save_json()` 原来直接 `open(path,"w")`（先截断再写 1.7MB），
+proxy 若正好在窗口内读到会 `json.load()` 抛错 → 正好触发上面那条断链。
+已改为写 `.tmp` + `os.replace()` **原子替换**，读者永远读到完整 JSON。
+
+细节见 `references/proxy-runtime-freshness.md`。
+
+### ⚠️ 测 proxy 检索链路不要打 `/v1/chat/completions`（会同步调 LLM 超时）
+
+`POST /v1/chat/completions` 会**同步转发给 LLM**，压测时 120s 都超时（本次实测）。
+要单独测检索链路，在进程内直接调 `search_single_kb()`：
+
+```python
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("hsp", "/home/ecs-user/hermes-skill-proxy/hermes-skill-proxy.py")
+mod = importlib.util.module_from_spec(spec)
+sys.modules["hsp"] = mod          # ← 必须放进 sys.modules
+spec.loader.exec_module(mod)
+mod.load_all_indexes()            # ← 必须调用！否则 _doc_scores 为空，返回 []
+for r in mod.search_single_kb("inexbot", "冲压工艺 手册 参数设置", 5):
+    print(r["title"], len(r["content_snippet"]), r["url"].count("%25"))
+```
+
+两个必踩的坑：
+1. **必须用 `/usr/bin/python3`** —— 沙盒 `python3` 没装 flask，`import` 直接失败
+2. **必须 `mod.load_all_indexes()`** —— 不调用则 `_doc_scores` 为空，
+   `search_single_kb()` 静默返回**空列表**（不报错，看着像「检索不到」）
 
 ### ⚠️ sitemap 里的 URL 是 XML 转义过的，`&amp;` 会导致整页 404（2026-10-24 已修）
 

@@ -87,9 +87,18 @@ def md5_text(text: str) -> str:
     return hashlib.md5(text.encode()).hexdigest()[:8]
 
 def save_json(obj, path: Path):
+    """
+    原子写入 JSON。
+
+    ⚠️ 必须先写临时文件再 os.replace()：hermes-skill-proxy 每 5 小时读一次
+    index.json，直接 open(path,"w") 会先把文件截断成空，再慢慢写入 ——
+    这期间 proxy 若正好读到，会 json.load() 抛错。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
 
 def load_json(path: Path):
     with open(path, encoding="utf-8") as f:
