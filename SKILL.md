@@ -1,7 +1,7 @@
 ---
 name: inexbot-knowledge-base
 description: "纳博特科技知识库 RAG：每天定时爬取 doc.inexbot.com，由 hermes-skill-proxy 在请求时进行内存检索并注入 system prompt。"
-version: 2.5.0
+version: 2.6.0
 author: Hermes Agent
 license: MIT
 metadata:
@@ -127,12 +127,19 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 
 **标准 cron 流程（6 步）**：
 
+0. **先读上一轮的待办**（`hermes cron list` 的 `Last run` 字段含上一轮报告全文）——
+   上一轮列的「待办 / 未完成」就是本次的前置任务，清不掉就别声称已修复
 1. `crawler.py` 爬取
 2. `check_crawl_state.py` 漂移探针 —— 只有 `IDENTICAL` 才算「无变化」
 3. 索引完整性对账（零长度 snippet / `Not Found` / 空标题 / 裸 `%` / slug 契约）
 4. 检索链路实测 —— `content_snippet` 长度判据（>800 正文命中，==800 静默降级）
 5. **引用链接实网可达性**（`/health` 绿灯 ≠ 用户点得到链接）
 6. 修复 → 部署 → 回归
+
+> ⚠️ **第 0 步为什么不能省**：2026-10-28 发现 10-27 那轮的 4 条待办
+> （部署 proxy 补丁 / 提交推送 / 清理测试进程 / 补写文档）**全部跨 session 泄漏了一天**。
+> 根因是补丁只写了磁盘没部署 + 报告只写「已修复」没附证据 →
+> 下一轮无法判断状态，直接跳过。详见 `references/kb-cron-verification-workflow.md` §0。
 
 > ⚠️ **第 2 步若报 `orphan md > 0`**（md/raw 文件数 > index 条目数，但 index 条目数没变）
 > = **上游把页面搬了目录**（改了 URL 路径），不是内容变更。
@@ -525,6 +532,53 @@ proxy 若正好在窗口内读到会 `json.load()` 抛错 → 正好触发上面
 已改为写 `.tmp` + `os.replace()` **原子替换**，读者永远读到完整 JSON。
 
 细节见 `references/proxy-runtime-freshness.md`。
+
+### ⚠️ 补丁「写了」≠ 补丁「上线了」（2026-10-28 现场，最易跨 session 泄漏）
+
+**agent 在 session A 把补丁写进磁盘、写进文档、甚至报告说「已修复」，
+但没重启服务、没 git commit** → 补丁在磁盘上躺一整天，线上跑的还是旧进程。
+
+2026-10-28 实测：`schedule_reload()` 重载链补丁于 **10-27 11:38** 落盘，
+线上 proxy 进程启动于 **10-27 11:16** —— **进程比补丁早 21 分钟**，
+`git status` 显示该文件**从未提交**。10-27 报告里列的 4 条「待办（未完成）」
+中的「部署 proxy 补丁」「提交并推送」，直到 10-28 才被补做。
+
+**判据**（补丁文件 mtime 晚于进程启动时间 = 线上没带补丁）：
+
+```bash
+stat -c '%y %n' /home/ecs-user/hermes-skill-proxy/hermes-skill-proxy.py
+ps -o pid,lstart,etime -p $(pgrep -f hermes-skill-proxy.py | head -1)
+```
+
+**改完 proxy 代码必须三件事一起做**，缺一则补丁等于没打：
+1. `sudo -n systemctl restart hermes-skill-proxy.service` —— 不重启 = 线上跑旧代码
+2. `git commit` + `git push` —— 不提交 = 下次 `git pull` 静默回退
+3. 报告里给出**新 PID + commit hash + 补丁特征 grep 结果**作为已部署的证据
+
+> ⚠️ 只写「已修复」会被下一个 session 当成「已收尾」而跳过。
+> 另外：**cron 开头要读上一轮报告的待办**（`hermes cron list` 的 `Last run` 字段
+> 含上一轮全文），把它们当本次前置任务，清不掉就别声称已修复。
+
+> ⚠️ **遗留压测进程要清理**：用 `/usr/bin/python3 /tmp/proxy_reload_test.py &`
+> 起的压测副本会活到下次 cron。2026-10-28 发现 10-27 压测实例仍占着 **8646 端口**。
+> `ss -ltnp | grep -E "864[0-9]"` 应只有 8643（proxy）+ 8642（gateway）。
+> 清理前先看 cmdline 确认不是姊妹 KB 在用；记下 PID 再 `kill <PID>`，**不要 `pkill -f`**。
+
+完整细节见 `references/proxy-runtime-freshness.md` §陷阱 4。
+
+### ⚠️ 遗留压测进程占用端口（2026-10-28 现场）
+
+压测 proxy 时用 `/usr/bin/python3 /tmp/proxy_reload_test.py &` 直接起的副本
+**会活到下次 cron**。2026-10-28 发现 10-27 压测实例仍占着 **8646 端口**。
+
+```bash
+ss -ltnp | grep -E "864[0-9]"   # 应只有 8643(proxy) + 8642(gateway)
+ps aux | grep -E "proxy_reload|proxy-unbuf" | grep -v grep
+kill <PID>                      # 记下 PID 再 kill；不要 pkill -f（会匹配到自己）
+```
+
+> ⚠️ 清理前先看 cmdline 确认不是姊妹 KB 的 cron 在用。
+> 压测实例 cmdline 会含 `/tmp/proxy_reload_test.py` 之类，明显不是正式服务。
 
 ### ⚠️ 测 proxy 检索链路不要打 `/v1/chat/completions`（会同步调 LLM 超时）
 

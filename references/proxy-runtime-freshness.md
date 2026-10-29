@@ -186,6 +186,102 @@ def save_json(obj, path: Path):
 
 `os.replace()` 在同一文件系统内是原子的 → 读者**永远**读到完整 JSON。
 
+## ⚠️ 陷阱 4：补丁「写了」≠ 补丁「上线了」—— 跨 session 的未部署补丁（2026-10-28 现场）
+
+**这是本 skill 最隐蔽、代价最高的一类失败**：agent 在 session A 里把补丁**写进磁盘**、
+**写进文档**、甚至在报告里说「已修复」，但**没有重启服务**、**没有 git commit**。
+于是补丁在磁盘上躺了**一整天**，线上跑的仍是**打补丁前的进程**。
+
+### 2026-10-28 实测现场
+
+`schedule_reload()` 的重载链补丁（`try/except/finally`）在 **10-27 11:38:09** 落盘，
+而线上 proxy 进程启动于 **10-27 11:16:55** —— **进程比补丁早 21 分钟**。
+结果：磁盘上是修复版，线上跑的是有 bug 的版本，且 `git status` 显示该文件**从未提交**。
+
+10-27 那次 cron 的报告里列了 4 条「待办（本次工具额度用尽，未完成）」，
+其中第 1 条就是「部署 proxy 补丁」，第 2 条是「提交并推送」——
+**待办跨 session 泄漏了一整天**，直到 10-28 的 cron 才被发现并补做。
+
+### 判据：磁盘代码 vs 运行中进程
+
+```bash
+# ① 补丁文件的落盘时间
+stat -c '%y %n' /home/ecs-user/hermes-skill-proxy/hermes-skill-proxy.py
+
+# ② 线上进程的启动时间
+systemctl show hermes-skill-proxy.service -p MainPID -p ActiveEnterTimestamp
+ps -o pid,lstart,etime -p $(pgrep -f hermes-skill-proxy.py | head -1)
+
+# ③ 补丁文件 mtime 晚于进程启动时间 → 线上跑的是旧代码，必须重启
+```
+
+**③ 成立 = 线上没带这个补丁。** 无论补丁写得多正确、文档写得多详细。
+
+### 验证「重启后线上真的带补丁了」
+
+重启本身不够 —— 要**确认运行中的代码含新逻辑**：
+
+```bash
+sudo -n systemctl restart hermes-skill-proxy.service
+sleep 4
+PID=$(systemctl show hermes-skill-proxy.service -p MainPID --value)
+ps -o pid,lstart,etime -p $PID
+# 关键：新启动时间必须晚于补丁 mtime
+stat -c 'patch mtime: %y' /home/ecs-user/hermes-skill-proxy/hermes-skill-proxy.py
+
+# 确认代码里确实有补丁特征
+grep -n -A14 "def schedule_reload" /home/ecs-user/hermes-skill-proxy/hermes-skill-proxy.py | head -20
+grep -n "^import sys" /home/ecs-user/hermes-skill-proxy/hermes-skill-proxy.py
+
+# 确认定时器线程存活（threads=2 = main + timer；=1 说明定时器链断了）
+ls /proc/$PID/task | wc -l
+```
+
+2026-10-28 实测：重启后 PID 1761173 启动于 11:08:34（晚于 11:03 的 index.json mtime，
+也晚于补丁落盘），`grep` 确认 `try/except/finally` + `import sys` 都在，
+`threads=2` → **确认线上带补丁且定时器存活**。
+
+### 通用规则：改完 proxy 代码必须三件事一起做
+
+| # | 动作 | 漏了会怎样 |
+|---|---|---|
+| 1 | `sudo -n systemctl restart hermes-skill-proxy.service` | 线上跑旧代码，补丁等于没打 |
+| 2 | `git commit` + `git push` | 下次 `git pull` 静默回退，补丁丢失 |
+| 3 | 在报告里写明「已部署 + 已提交 + 线上 PID」 | 下个 session 无从知道是否已收尾 |
+
+> ⚠️ **报告里写「已修复」时，必须同时给出这三条的证据**（新 PID、commit hash、
+> 补丁特征 grep 结果）。只写「已修复」会被下一个 session 当成「已收尾」而跳过，
+> 补丁就永远悬在半路 —— 这正是 10-27 → 10-28 发生的事。
+
+### ⚠️ 待办跨 session 泄漏时，cron 必须先读上一轮的待办
+
+`hermes cron list` 的 `Last run` 字段里带上一轮报告全文（含「待办」清单）。
+**cron 开头就该扫一遍上一轮报告的待办**，把它们当作本次的前置任务：
+
+```bash
+hermes cron list 2>&1 | grep -A 60 "Last run"
+```
+
+看到「待办 / 未完成 / TODO」字样 → 那些就是本次必须清掉的事项，
+**清不掉就别在报告里说「已修复」**。
+
+### ⚠️ 遗留测试进程要清理
+
+压测用的 proxy 副本（改短 `RELOAD_INTERVAL` 的那种）如果用
+`/usr/bin/python3 /tmp/proxy_reload_test.py &` 直接起，会**一直活到下次 cron**。
+
+2026-10-28 实测：10-27 压测留下的 `/tmp/proxy_reload_test.py` 仍占着 **8646 端口**
+（10-27 自己的报告待办第 3 条就提到了它，但没清）。
+
+```bash
+ss -ltnp | grep -E "864[0-9]"        # 应该只有 8643(proxy) 和 8642(gateway)
+ps aux | grep -E "proxy_reload|proxy-unbuf" | grep -v grep
+kill <PID>                             # 记下 PID 再 kill，不要用 pkill -f
+```
+
+> ⚠️ 清理前**先确认它不是姊妹 KB 的 cron 正在用的东西**（`ps aux` 看命令行路径）。
+> 压测实例的 cmdline 会含 `/tmp/proxy_reload_test.py` 之类，明显不是正式服务。
+
 ## cron 收尾：什么时候必须重启 proxy
 
 | 情况 | 是否要重启 |

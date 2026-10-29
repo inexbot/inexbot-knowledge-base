@@ -23,6 +23,27 @@
 
 ## 标准 cron 流程（6 步）
 
+### 0. 先读上一轮的待办（2026-10-28 新增，最容易被漏掉的一步）
+
+`hermes cron list` 的 `Last run` 字段包含**上一轮报告的全文**，包括它的「待办」清单。
+
+```bash
+hermes cron list 2>&1 | grep -A 60 "Last run"
+```
+
+2026-10-28 现场：10-27 那轮列了 4 条「待办（本次工具额度用尽，未完成）」——
+「部署 proxy 补丁」「提交并推送两处改动」「清理测试进程」「补写 skill 文档」——
+**全部跨 session 泄漏了一整天**，直到 10-28 的 cron 扫到 `Last run` 才补做。
+
+**规则**：
+- 上一轮有「待办 / 未完成 / TODO」→ 那些就是本次的**前置任务**，先清
+- 清不掉 → 报告里**不要**声称相关项「已修复」
+- 有新增待办 → 同样要留下可追踪的证据（新 PID / commit hash）
+
+> 💡 这条为什么重要：上一轮 agent 可能**只改了磁盘没部署**，
+> 「已修复」的措辞会让下一轮直接跳过 → 补丁永远悬在半路。
+> 详见 `references/proxy-runtime-freshness.md` §陷阱 4。
+
 ### 1. 爬取
 
 ```bash
@@ -151,6 +172,51 @@ cd <skill repo> && git status -sb
 4. **提醒**（比如「工作树里有未提交的改动，已一并提交」）
 
 坏的报告：把 60 行「跳过（已存在）」日志贴出来。
+
+### ⚠️ 报告里的「已修复」必须附证据（2026-10-28 新增）
+
+**只写「已修复」会被下一个 session 当成「已收尾」而跳过** —— 补丁就永远悬在半路。
+
+写「已修复」时必须同时给出：
+
+| 声称 | 必须附的证据 |
+|---|---|
+| proxy 补丁已部署 | 新 PID + `ActiveEnterTimestamp`（晚于补丁 mtime）+ 补丁特征 `grep` 结果 |
+| 定时器链健在 | `ls /proc/<PID>/task \| wc -l` = **2**（main + timer；=1 说明链断了） |
+| 代码已入库 | commit hash + push 成功输出 |
+| 链接可用 | 抽样 URL 的 HTTP 状态码数量（如 `20/20 全部 200`） |
+
+2026-10-28 的报告因为给出了「新 PID 1761173 / 启动于 11:08:34 / commit 1b8c523 /
+threads=2 / 20 条 URL 全 200」，所以下一轮 cron 能一眼看出状态，不会重复劳动或误判。
+
+## ⚠️ cron 收尾清单（别只跑爬虫就结束）
+
+```bash
+# ① 上一轮待办是否已清空（见 §0）
+hermes cron list 2>&1 | grep -A 60 "Last run"
+
+# ② 两个 repo 是否有未提交改动
+for r in /home/ecs-user/hermes-skill-proxy \
+         ~/.hermes/skills/productivity/inexbot-knowledge-base \
+         ~/.hermes/skills/productivity/inexbot-open-knowledge-base; do
+  echo "--- $r"; git -C $r status -sb | head -5
+done
+
+# ③ 遗留压测进程 / 端口占用（应只有 8643 proxy + 8642 gateway）
+ss -ltnp | grep -E "864[0-9]"
+ps aux | grep -E "proxy_reload|proxy-unbuf" | grep -v grep
+
+# ④ 线上 proxy 是否带最新补丁（补丁 mtime 晚于进程启动 = 没带）
+stat -c '%y %n' /home/ecs-user/hermes-skill-proxy/hermes-skill-proxy.py
+ps -o pid,lstart,etime -p $(pgrep -f hermes-skill-proxy.py | head -1)
+```
+
+> ⚠️ 第 ② 项若看到**姊妹 KB** 的 repo 有未提交改动 —— **不要替它提交**。
+> 姊妹 KB 的 cron 正在跑（同一时刻 11:00），它的改动归它自己收尾。
+> 只在报告里**指出**即可：「姊妹 KB 工作树有未提交改动，属于其 cron 职责」。
+> 2026-10-28 就是这么处理的 —— 姊妹 KB 的 `crawler.py` 工作树版本已含原子写，
+> 但未入库；**若它自己的 cron 不提交，下次 `git pull` 会退回非原子写版本**，
+> 那正是 proxy 重载链断裂的潜在触发点，值得在报告里点名。
 
 ## ⚠️ 结论要区分「已证实的故障」和「我怀疑的故障」
 
