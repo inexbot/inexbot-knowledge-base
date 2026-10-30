@@ -153,6 +153,11 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 > `crawler.py` 增量爬虫**不会**清理旧 slug → 必须补跑 `refresh_drift.py`（唯一会清孤儿的脚本），
 > **且必须重启 proxy**（旧 md 已删，proxy 内存里的旧索引会指向 404 的旧 URL）。
 > 完整诊断流程见 `references/upstream-url-migration.md`。
+>
+> ⚠️ **2026-10-30 实测：姊妹 KB `inexbot-open` 的 1056 个孤儿 md 属于「历史死缓存」，
+> 不是本轮 URL 迁移** —— 判别方法：跑一遍「用 proxy 的 slug 规则反推哪些 md 可达」，
+> 可达数 == index 条目数 → 孤儿都是不可达死缓存，架构上不影响检索。
+> 本 KB `inexbot` 的孤儿数是 **0**，符合健康态。
 
 > ⚠️ **proxy 的内存索引 ≠ 磁盘上的 `index.json`**。爬虫更新了磁盘文件不等于
 > proxy 用上了新内容（proxy 每 5h 才重载一次）。**上游改 URL 路径时必须重启 proxy**：
@@ -390,6 +395,63 @@ cd <skill repo> && git status -sb
 > 2026-10-29 实测：10-28 报告写「已提交 `c7bbf5e`」，本轮 `git status` 仍有
 > 3 个文件 `M`（217 行）没进库。报告里的 commit hash 只证明「那个 commit 在库里」，
 > 不证明「工作树此刻干净」。
+
+### ⚠️ proxy 的 service 模板写死 `User=inexbot` → 装到别的机器上 systemd 起不来（2026-10-30 已修）
+
+**症状**：`setup.sh` 装出来的 unit 是 `User=inexbot` + `WorkingDirectory=/home/inexbot`，
+但**大多数机器上根本没有 `inexbot` 这个用户** → systemd 报
+`Failed to determine user credentials: No such process` / `280 failed`，服务根本起不来。
+
+**根因**：模板里硬编码了 `User=inexbot`，而 `setup.sh` 只 sed 了 `/home/inexbot` 这一个路径：
+
+```bash
+sed "s|/home/inexbot|${HOME}|g" "${SERVICE_FILE}" > /tmp/hermes-skill-proxy.service
+```
+
+→ `User=` 行**根本没被 sed 覆盖**（因为它写的是 `inexbot` 不是 `/home/inexbot`），
+而且 `WorkingDirectory` 被错误渲染成 `$HOME` 而不是 proxy 目录。
+
+**修复（2026-10-30 已提交并推送 `hermes-skill-proxy` repo，commit `001ddfb`）**：
+模板改用占位符，由 setup.sh 按实际环境渲染：
+
+```ini
+User=@USER@
+WorkingDirectory=@PROXY_DIR@
+ExecStart=/usr/bin/python3 @PROXY_DIR@/hermes-skill-proxy.py
+```
+
+```bash
+sed -e "s|@USER@|$(id -un)|g" \
+    -e "s|@PROXY_DIR@|${PROXY_DIR}|g" \
+    "${SERVICE_FILE}" > /tmp/hermes-skill-proxy.service
+```
+
+**验证方法（可复制）**：渲染后与线上 `/etc/systemd/system/` 版本逐字节比对 ——
+
+```bash
+cd ~/hermes-skill-proxy
+sed -e "s|@USER@|$(id -un)|g" -e "s|@PROXY_DIR@|$PWD|g" hermes-skill-proxy.service > /tmp/rendered.service
+diff /tmp/rendered.service <(sudo -n cat /etc/systemd/system/hermes-skill-proxy.service)
+```
+
+2026-10-30 实测：渲染结果与线上部署版**逐字节相同** → 模板与实际部署一致，
+`setup.sh` 重装不会把服务改坏。
+
+> ⚠️ **模板原来是 CRLF 行尾**（git 里 26 行 CRLF），而线上部署版是 LF。
+> 渲染后 `diff` 会显示「每行都不同」但内容看起来一样 —— **这是行尾差异，不是内容差异**。
+> 已统一成 LF。排查此类「diff 显示全变了但内容一样」时先 `file` 一下。
+
+### ⚠️ 单元重启后要确认环境变量真的进了进程（2026-10-30 现场）
+
+`systemctl restart` 之后，**光看 `systemctl show -p Environment` 不够** ——
+那读的是 unit 文件，不等于进程实际继承的环境。要直接读 `/proc`：
+
+```bash
+sudo -n tr '\0' '\n' < /proc/$(pgrep -f hermes-skill-proxy.py | head -1)/environ | grep -E "^(PROXY_PORT|HERMES_URL|HERMES_API_KEY|SKILL_NAME)="
+```
+
+2026-10-30 实测：重启前该进程**一个变量都没有**（运行中的 PID 1761173 是旧环境，
+`Environment=` 块被忽略的遗留），重启后 4 个变量全部到位。
 
 ### ⚠️ 无人值守 cron 下删文件会被审批卡住（2026-10-29 现场）
 
