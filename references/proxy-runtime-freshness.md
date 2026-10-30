@@ -32,32 +32,62 @@ ls -la ~/.hermes/kb/inexbot/index.json
 ### 更强的判据：直接比对「proxy 内存索引」vs「磁盘 index.json」
 
 mtime 比较是**间接**判据（mtime 新不一定说明内存旧，比如爬虫重写了同样内容）。
-**直接判据**是读 proxy 进程的内存索引跟磁盘文件逐条比对（2026-10-28 新增）：
+**直接判据**是读 proxy 加载后的内存索引跟磁盘文件逐条比对。
+
+> ⚠️⚠️ **2026-10-29 更正：不要用 `mem[k].get("title")` 比对 title！**
+>
+> proxy 的 `_doc_scores[name][path]` 存的是**分词后的 token 集合**，不是原始字符串：
+> ```python
+> scores[path] = {
+>     "title_tokens":   {w for w in jieba.cut(item.get("title",""))       if len(w) >= 2},
+>     "desc_tokens":   {w for w in jieba.cut(item.get("description","")) if len(w) >= 2},
+>     "content_tokens":{w for w in jieba.cut(item.get("content_snippet","")) if len(w) >= 2},
+>     "word_counts":   item.get("word_counts", {}),
+> }
+> ```
+> 所以 `disk[k]["title"] != mem[k].get("title")` 恒为 `True`
+> （`mem[k]` 没有 `title` 键 → 取到 `""`）→
+> **2026-10-29 实测：558 条全部报「title 不一致」，全是假阳性。**
+>
+> ✅ **正确做法：token 级比对**——把磁盘侧也用同一套 jieba 规则切词再比集合。
 
 ```python
 import importlib.util, sys, json
 from pathlib import Path
+import jieba
 spec = importlib.util.spec_from_file_location("hsp", "/home/ecs-user/hermes-skill-proxy/hermes-skill-proxy.py")
 mod = importlib.util.module_from_spec(spec)
 sys.modules["hsp"] = mod
 spec.loader.exec_module(mod)
 mod.load_all_indexes()          # ← 必须调用
 
-for kb, path in [("inexbot", ".hermes/kb/inexbot/index.json"),
-                 ("inexbot-open", ".hermes/kb/inexbot-open/index.json")]:
-    disk = json.loads((Path.home()/path).read_text(encoding="utf-8"))
-    mem  = mod._index_data[kb]          # ← proxy 的内存索引
-    dk, mk = set(disk), set(mem)
-    print(kb, "keys only in disk:", len(dk-mk), "| only in mem:", len(mk-dk))
-    diff = sum(1 for k in (dk & mk)
-               if disk[k].get("title") != mem[k].get("title")
-               or disk[k].get("content_snippet") != mem[k].get("content_snippet"))
-    print("  title/snippet 不同的条目:", diff)
+def toks(s):                     # ← 必须与 proxy 的切词规则一致（len >= 2）
+    return {w for w in jieba.cut(s or "") if len(w) >= 2}
+
+kb   = "inexbot"
+disk = json.loads((Path.home()/".hermes/kb/inexbot/index.json").read_text(encoding="utf-8"))
+mem  = mod._doc_scores[kb]       # ← token 化后的内存索引
+dk, mk = set(disk), set(mem)
+print("memory:", len(mem), "disk:", len(disk), "key sets equal:", dk == mk)
+
+bad = 0
+for k in dk.intersection(mk):
+    d, m = disk[k], mem[k]
+    if (toks(d.get("title",""))        != m["title_tokens"]
+     or toks(d.get("description",""))  != m["desc_tokens"]
+     or toks(d.get("content_snippet","")) != m["content_tokens"]):
+        bad += 1
+print("token-level mismatches (memory vs disk):", bad)
 ```
 
-- `keys only in disk > 0` 或 `keys only in mem > 0` → **内存索引已过期，必须重启**
-- `title/snippet 不同的条目 > 0` → 内容也过期
+判读：
+- `key sets equal == False` → **内存索引已过期，必须重启**
+- `token-level mismatches > 0` → 内容也过期
 - 全 0 → **内存索引与磁盘逐条一致，无需重启**
+
+> 💡 `mod._index_data[kb]` 存的是**原始 index dict**（可直接比 title/snippet），
+> 但它和 `_doc_scores` 是同一次 `load_all_indexes()` 的产物，一样是「新进程读的磁盘」，
+> **不代表线上进程的内存**。两个都验不出线上真实内存 —— 线上只能靠 mtime 判据。
 
 > ⚠️ 注意：这段代码在**新进程**里跑，`mod.load_all_indexes()` 读的是
 > **磁盘**文件，不是线上进程的内存 —— 所以它验的是「proxy 代码 + 磁盘」的一致性。
@@ -65,9 +95,18 @@ for kb, path in [("inexbot", ".hermes/kb/inexbot/index.json"),
 > **真正要判的是线上进程的启动时间 vs index.json mtime**（上面的 mtime 判据）。
 > 本脚本的价值是：验证「proxy 代码能正确加载当前磁盘索引」+「两个 KB 的 key 集合是否一致」。
 >
-> 2026-10-28 实测：两个 KB 的 key 集合与 title/snippet 全部一致（0 差异），
-> 配合「proxy 启动于 11:08:34、index.json mtime 11:03」的 mtime 判据，
-> 确认线上内存索引为最新。
+> 2026-10-29 实测：inexbot key 集合相同、token 级比对 **0 处不一致** → 确认无差异。
+
+### ⚠️ 在 shell heredoc 里写 `&` 会被 terminal 拦下
+
+`for k in dk & mk:` 这种写法会被安全扫描判成「前台命令用了后台符号」并拒绝执行：
+
+```
+Foreground command uses '&' backgrounding. Use terminal(background=true) ...
+```
+
+✅ 改用集合方法：`dk.intersection(mk)` / `dk.difference(mk)`，或
+`dk & mk` 写成 `dk.intersection(mk)`。**在 heredoc 里也一样会被拦。**
 
 ## ⚠️ 陷阱 1：journal 里没有重载记录 ≠ 重载没发生（stdout 块缓冲）
 

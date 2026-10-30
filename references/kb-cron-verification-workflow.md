@@ -77,6 +77,107 @@ verdict 三态：`IDENTICAL`（真稳态）/ `CONTENT-DRIFT`（需 `--force` 或
 # index key → md 文件是否可解析（slug 契约）
 ```
 
+#### ⚠️ 修 bug 前先看姊妹 KB 是否已修（2026-10-29 立规）
+
+两个 KB 是**姊妹关系**（同一套 crawler 逻辑、只换目标站点），
+且**姊妹 KB 经常比本 KB 先修好同类问题** —— 2026-10-29 现场：
+姊妹 KB 的 `crawler.py` 早已有 `clean_text()`（去 U+200B 零宽字符）和标题兜底链，
+而 `inexbot-open` 一直漏着，导致它的 index 卫生指标全面落后：
+
+| 指标 | `inexbot`（姊妹） | `inexbot-open`（修复前） | 修复后 |
+|---|---|---|---|
+| 含 U+200B 的条目 | 0 | **764** | 0 |
+| 空标题条目 | 0 | **39** | 0 |
+
+**规则：动手改 `crawler.py` 之前，先 grep 姊妹 KB 的同名脚本**：
+
+```bash
+grep -n "def clean_text\|og:title\|200B" \
+  ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/crawler.py
+```
+
+姊妹 KB 有现成实现 → **直接移植**（连注释一起），不要从零重写。
+
+#### ⚠️ 字面零宽字符写进源码会被静默吞掉（2026-10-29 踩坑）
+
+用编辑工具把 U+200B **字面量**写进 Python 源码的字符集时，它**被无声地丢掉了** ——
+写完检查发现字符集里只剩 `U+200C U+200D U+FEFF`，`U+200B` 不见了。
+不检查就上线，`clean_text()` 会**漏掉最常见的那个零宽字符**，且没有任何报错。
+
+**对策：字符集用显式 codepoint 构造，绝不写字面量。**
+
+```python
+_ZERO_WIDTH = "[" + "".join(chr(c) for c in (0x200B, 0x200C, 0x200D, 0xFEFF)) + "]"
+```
+
+**写完立刻验证字符集没被吞**：
+
+```python
+for i, ln in enumerate(src.splitlines(), 1):
+    if "_ZERO_WIDTH" in ln:
+        print(i, repr(ln), [hex(ord(c)) for c in ln if ord(c) > 127])
+```
+
+#### ⚠️ 改完抽取逻辑 → 离线重建 + 内容完整性核对（零网络）
+
+```bash
+python3 scripts/regenerate_from_cache.py --check   # 先看会改哪些
+python3 scripts/regenerate_from_cache.py             # 再写盘
+python3 scripts/regenerate_from_cache.py --check   # 必须报 rewritten=0 unchanged=N
+```
+
+> ⚠️ **`rewritten=0` 只证明「抽取确定性」，不证明「没改坏内容」。**
+> 改 `clean_text()` 这类会影响正文的函数时，必须额外做**内容完整性核对**：
+> 用新旧两个 extractor 分别抽**未截断**的全文，比对 token 集合（旧 ⊆ 新，丢失数必须为 0）。
+> ⚠️ **别用 `content_snippet` 比对** —— 它是截断后的窗口，
+> 去掉一个 ZWSP 字符会让 800 字窗口**边界移动** → 长度变化是窗口效应，不是内容丢失。
+> 2026-10-29 实测（open KB）：全量 799 页中 774 条完全一致、25 条仅空白差异、
+> **分词级 token 丢失数 = 0** ✅
+
+#### ⚠️ `diagnose_byte_change.py` 报 "MIXED" 可能是探针顺序假象（2026-10-29）
+
+`regenerate_from_cache.py` 写盘时会**刷新** `references/.index-snapshot.json`，
+于是该脚本拿到的「上次快照」已经是**修复后**的尺寸，
+再拿修复前的 `OLD 重建` 去比 → 必然不等 → 报 `MIXED`。
+
+**判读优先级：抓取次数 + `raw/` mtime > 脚本的 VERDICT 措辞。**
+只要「crawl log 里 0 次抓取」且「`raw/` 最新 mtime 早于爬取开始」，
+上游就不可能动过 —— 那就是纯本地变更。
+2026-10-29 实测：`OLD 重建 = 2,453,407` = **恰好等于修复前的 index 尺寸** → 铁证。
+
+#### ⚠️ 手写 slug 契约检查会崩在 `OSError [Errno 36]`（2026-10-29 现场）
+
+自己拼候选文件名时，如果用 `quote(path, safe="")` 作为候选，
+**超长中文路径会超过 Linux 255 字节文件名上限** → `Path.exists()` 抛
+`OSError: [Errno 36] File name too long` → 检查脚本当场崩掉。
+
+proxy 自己是用 try/except 兜住的（`read_full_content()` 里 `except OSError: continue`），
+所以线上不会挂 —— 但**你的检查脚本会挂**。
+
+✅ **最佳做法：直接复用 proxy 的候选生成函数**，别自己复刻：
+
+```python
+spec = importlib.util.spec_from_file_location("hsp", "/home/ecs-user/hermes-skill-proxy/hermes-skill-proxy.py")
+mod = importlib.util.module_from_spec(spec); sys.modules["hsp"] = mod
+spec.loader.exec_module(mod)
+
+for k, v in idx.items():
+    path = v.get("path") or k
+    for slug in mod._md_slug_candidates(path):     # ← 复用 proxy 的实现
+        cand = md_root / f"{slug}.md"
+        try:
+            if cand.exists():
+                hit = cand; break
+        except OSError:                              # ← Errno 36 必须兜住
+            continue
+```
+
+2026-10-29 实测：复用 `_md_slug_candidates()` 后 **558/558 全部解析成功，
+`OSError` 吞掉 0 次**（因为第一个候选就命中，根本走不到超长的 `quote()` 候选）。
+
+> 💡 三个 slug 契约副本（proxy / `retrieve.py` / `check_crawl_state.py`）
+> 必须保持一致 —— 这正是「复用而不是复刻」的价值。
+
 ### 4. 检索链路实测（snippet 长度判据）
 
 用 `scripts/check_retrieval_chain.py`（open skill 自带）跑两个 KB：
@@ -84,6 +185,41 @@ verdict 三态：`IDENTICAL`（真稳态）/ `CONTENT-DRIFT`（需 `--force` 或
 - `content_snippet` **> 800** = 正文命中
 - **== 800** = 静默降级成 index 摘要 → **BUG**
 - **< 200** = 上游本来就是占位页（如伺服报错一行）→ 正常，用 md 实际字节数确认
+
+#### ⚠️ `verify_kb.py` 的「短 snippet」note 要再判一层（2026-10-29 现场）
+
+`verify_kb.py` 会输出：
+
+```
+note: 短 snippet  247  inexbot / 示教器 操作手册 / 操作手册  ← 疑似静默降级
+```
+
+**这个 note 并不等于「有 BUG」** —— 它只是「长度 < 800」的粗筛。
+真正的判别要看 **md 文件的实际字节数**：
+
+| `snippet_len` | md 实际字节数 | 结论 |
+|---|---|---|
+| `== 800` | — | **静默降级**（index 摘要兜底）→ BUG |
+| `< 800` | `== snippet_len` | **正文已完整读取**，只是这一页本身就很短 → 正常 |
+| `< 800` | `> snippet_len` | 部分读取 → 查 slug 契约 |
+
+2026-10-29 实测：5 条「短 snippet」note 全部满足 `md_bytes == snippet_len`
+（247 / 277 / 418 / 440 / 468 字节），即**磁盘正文被完整取出**，
+这些是「示教器无法开机」「伺服错误」这类本身就两三行的 FAQ 页 → **无 BUG**。
+
+核验脚本：
+
+```python
+for r in mod.search_single_kb("inexbot", q, 30):
+    if len(r.get("content_snippet","")) < 800:
+        for slug in mod._md_slug_candidates(r.get("path") or ""):
+            c = md_root / f"{slug}.md"
+            try:
+                if c.exists(): hit = c; break
+            except OSError: continue
+        disk_len = len(hit.read_text(encoding="utf-8")) if hit else -1
+        print(r["title"], len(r["content_snippet"]), disk_len)
+```
 
 ### 5. 引用链接可达性（本次新增的盲区）
 
@@ -107,6 +243,69 @@ verdict 三态：`IDENTICAL`（真稳态）/ `CONTENT-DRIFT`（需 `--force` 或
 > ⚠️ 仓库里的 `hermes-skill-proxy.service` 副本是**旧的**
 > （`User=inexbot`、`WorkingDirectory=/home/inexbot`，该目录根本不存在）——
 > **以 `/etc/systemd/system/` 下的为准**。
+
+#### ⚠️ systemd `Environment=` 块写错 → 4 个环境变量被静默忽略（2026-10-29 修复）
+
+**两个 KB 共用同一个 proxy unit，所以这条对两边都成立。**
+
+unit 里若写成：
+
+```ini
+Environment=
+  PROXY_PORT=8643
+  HERMES_URL=http://localhost:8642
+  HERMES_API_KEY=hermes-website-search
+  SKILL_NAME=inexbot-knowledge-base
+```
+
+**systemd 不支持 `Environment=` 后跟缩进续行** —— 它把 `PROXY_PORT=8643` 当成一个
+未知名的 directive key，于是**这 4 个变量全部被丢弃**。
+`Environment=` 后接续行是 shell `.env` 的写法，systemd 不认。
+
+**症状**（`journalctl -u hermes-skill-proxy` 反复出现）：
+
+```
+hermes-skill-proxy.service:11: Unknown key name 'PROXY_PORT' in section 'Service', ignoring.
+hermes-skill-proxy.service:12: Unknown key name 'HERMES_URL' in section 'Service', ignoring.
+hermes-skill-proxy.service:13: Unknown key name 'HERMES_API_KEY' in section 'Service', ignoring.
+hermes-skill-proxy.service:14: Unknown key name 'SKILL_NAME' in section 'Service', ignoring.
+```
+
+`systemctl show hermes-skill-proxy -p Environment` → 输出 `Environment=`（空）。
+
+**正确写法（每行一个 `Environment=`）**：
+
+```ini
+Environment="PROXY_PORT=8643"
+Environment="HERMES_URL=http://localhost:8642"
+Environment="HERMES_API_KEY=hermes-website-search"
+Environment="SKILL_NAME=inexbot-knowledge-base"
+```
+
+**复现 / 验证（不改线上文件）**：
+
+```bash
+systemd-analyze verify /tmp/probe-fixed.service 2>&1 | grep probe-fixed
+```
+
+旧写法 → 每行一条 `Unknown key name ... ignoring.`；新写法 → 对该 unit 零告警。
+
+> ⚠️ **`systemd-analyze verify` 要求文件名以 `.service` 结尾**。
+> 用 `.fixed` / `.txt` 会报 `Failed to prepare filename ...: Invalid argument`，
+> 看起来像「修复无效」其实是文件名问题 —— 先 `cp` 成 `xxx.service` 再验。
+
+> ⚠️ **改 `HERMES_API_KEY` 前先比对**：`/etc` 部署版里曾是被截断的占位符
+> `hermes...arch`（len=13），与代码默认值 `hermes-website-search`（len=21）**不同**。
+> 因为原块被忽略，线上一直用代码默认值；**修 unit 时要显式写代码默认值**，
+> 否则 proxy 会改用一个错误的 key 去转发 gateway。
+> 比对时用 sha 摘要，别把 key 明文打进日志。
+
+> ⚠️ 这个 unit 在 **proxy repo 模板 + `/etc/systemd/system/` 部署版各有一份**，
+> **两份都要改**，否则下次 `setup.sh` 重装会把旧写法写回去。
+
+> ⚠️ `/etc/systemd/system/` 下的文件普通用户**不可写**（`PermissionError`）。
+> 流程是：读原文件 → 在 `/tmp` 生成修正版 → `sudo -n cp` 覆盖 → `sudo -n systemctl daemon-reload`。
+> 覆盖后用 `systemctl show ... -p Environment` 确认 4 个变量都在。
 
 ### 6b. 什么时候**必须**重启 proxy（不能只等 5h 自动重载）
 
@@ -160,6 +359,42 @@ cd <skill repo> && git status -sb
 
 看到 `M scripts/crawler.py` 或一批 `?? references/` / `?? scripts/*.py`，
 说明有重要改动没进版本库 → **提交并推送**，否则下次 pull 会静默回退。
+
+#### ⚠️ 上一轮报告说「已完成」但工作树其实没提交（2026-10-29 现场）
+
+**上一轮的 `Last run` 报告里写着「已提交并推送 `c7bbf5e`」，**
+但本轮 `git status` 仍显示 3 个文件 `M`（`SKILL.md` /
+`references/kb-cron-verification-workflow.md` / `references/proxy-runtime-freshness.md`，
+共 217 行新增）—— 也就是说**上一轮提交的是另一个 commit，
+本轮这些改动根本没进版本库**。
+
+规律：**报告里的 commit hash 只证明「那个 commit 在库里」，
+不证明「工作树此刻是干净的」。** 第 ② 项检查（`git status -sb`）
+必须**每轮都独立跑**，不能因为上一轮报告说了「已提交」就跳过。
+
+本次已补做：`a87aa82` → push 首次即成功。
+
+#### ⚠️ 无人值守 cron 下的删除操作会被卡住（2026-10-29 现场）
+
+清理 `/tmp` 下的压测残留时：
+
+```
+rm -f /tmp/proxy_chain_test.py /tmp/proxy_reload_test.py ...
+→ ⚠️ delete in root path. Asking the user for approval.
+```
+
+`/tmp` 属于「root path」，删除需要**用户审批**。cron 场景**没有人能批**
+→ 这次清理做不成。
+
+✅ 正确做法：
+- **优先清进程**（`kill <PID>`）而不是清文件 —— 进程才是占端口/吃资源的实体，
+  残留的 `.py`/`.log` 文件不占端口、不影响服务
+- 确需删文件时，**在报告里写明残留清单 + 理由**（如「均为无进程占用的死文件，
+  不影响服务，清理需审批故保留」），把决定权交回给用户
+
+> 💡 压测残留**最该盯的是进程和端口**，不是文件。
+> 2026-10-29 检查：`ss -ltnp | grep -E "864[0-9]"` 只有 8643 + 8642 →
+> 端口干净 → `/tmp` 里的 `.py` 残留**不影响交付**，可以放着。
 
 ## 报告该怎么写
 

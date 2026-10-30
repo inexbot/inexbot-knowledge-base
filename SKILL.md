@@ -1,7 +1,8 @@
 ---
 name: inexbot-knowledge-base
 description: "纳博特科技知识库 RAG：每天定时爬取 doc.inexbot.com，由 hermes-skill-proxy 在请求时进行内存检索并注入 system prompt。"
-version: 2.6.0
+version: 2.8.0
+last_verified: 2026-10-29
 author: Hermes Agent
 license: MIT
 metadata:
@@ -141,6 +142,12 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 > 根因是补丁只写了磁盘没部署 + 报告只写「已修复」没附证据 →
 > 下一轮无法判断状态，直接跳过。详见 `references/kb-cron-verification-workflow.md` §0。
 
+> ⚠️ **第 0.5 步：`git status` 每轮都要独立跑**。上一轮报告里写了 commit hash
+> **不等于**工作树此刻干净 —— 2026-10-29 实测：10-28 报告说「已提交 `c7bbf5e`」，
+> 但本轮 `git status` 仍有 3 个文件 `M`（共 217 行）**根本没进版本库**。
+> 报告里的 commit hash 只证明「那个 commit 在库里」。详见
+> `references/kb-cron-verification-workflow.md` §「工作树」。
+
 > ⚠️ **第 2 步若报 `orphan md > 0`**（md/raw 文件数 > index 条目数，但 index 条目数没变）
 > = **上游把页面搬了目录**（改了 URL 路径），不是内容变更。
 > `crawler.py` 增量爬虫**不会**清理旧 slug → 必须补跑 `refresh_drift.py`（唯一会清孤儿的脚本），
@@ -164,22 +171,31 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 > 脚本会实网 curl，每个 KB 抽 12 条 URL，耗时约 20–40 秒。
 > 退出码 1 = 有 FAIL，可直接用于 cron 判定。
 >
-> **退出码 1 不一定是本 KB 的问题** —— `verify_kb.py` 同时检查两个 KB，姊妹 KB
-> `inexbot-open` 的历史遗留项（1056 个不可达死缓存孤儿 md、34 个分类索引页零长度
-> snippet、760 个标题带零宽字符 U+200B）会让它恒定报 6 项 FAIL。
+> ⚠️ **退出码 1 不一定是本 KB 的问题** —— `verify_kb.py` 同时检查两个 KB，姊妹 KB
+> `inexbot-open` 的历史遗留项会让它恒定报 6 项 FAIL。
 > **看失败列表的 `[KB 名]` 前缀分组**（2026-10-26 已给 `verify_kb.py` 加上归属），
 > 只有 `[inexbot]` 分组下的失败才算本 KB 的回归。
 >
-> 姊妹 KB 那 6 项**不影响用户回答**，已实测确认：
-> - 死缓存孤儿 md：proxy 只按 index path 定位 md，孤儿**在架构上不可达**
-> - 零长度 snippet 的 34 条是**分类索引页**（`# \n\n>纳博特科技官方SDK文档`），
->   实测 top-5 命中次数 **0**
-> - 零宽字符 U+200B：jieba 分词不受影响（实测 760 个受影响标题里，
->   产出「无干净 token」的为 **0**）
+> ⚠️ **2026-10-29：姊妹 KB 那 6 项已全部修复**（`inexbot-open` 侧修了 U+200B、
+> 空标题、离线重建）。所以现在 `verify_kb.py` 若仍报 `[inexbot-open]` 分组失败，
+> 说明是**新引入的回归**（或姊妹 KB 的 cron 还没提交/部署它的修复）——
+> **不要再当成「已知的无害遗留」放过**。
+> 姊妹 KB 当时的结论「这 6 项不影响用户回答」是对的
+> （死缓存孤儿 md 在架构上不可达；34 条零长度 snippet 是分类索引页、top-5 命中 0 次；
+> U+200B 不影响 jieba 分词），但**该修还是修** —— 修完后两个 KB 的卫生指标对齐，
+> 排查问题时也不会再被这些噪声干扰。
+> 详见姊妹 skill `inexbot-open-knowledge-base/references/index-hygiene-and-systemd-env-bugs.md`。
 >
 > 另注：两个 KB 的 cron 都定在 **11:00**，会同时跑。姊妹 KB 若正在跑
 > `regen_md.py` 之类修复脚本，此时 `verify_kb.py` 看到的是**修复中间态**，
 > 不要误判为回归 —— 先 `ps aux | grep -E "crawler.py|regen_md|refresh_drift"` 确认。
+>
+> ⚠️ **「短 snippet」note 要再判一层**：`verify_kb.py` 会输出
+> `note: 短 snippet 247 inexbot / ... ← 疑似静默降级`。
+> 这只是「长度 < 800」的粗筛，**不等于有 BUG**。真正的判别是看 md 实际字节数：
+> `== 800` → 静默降级（BUG）；`< 800` 且 `md_bytes == snippet_len` → 正文已完整读取，
+> 只是这一页本身就很短（FAQ 页）→ 正常。2026-10-29 实测 5 条 note 全部是后者。
+> 详见 `references/kb-cron-verification-workflow.md` §4。
 
 完整方法论（含「两个 KB 的 cron 并发改同一个 proxy 文件」的互相覆盖风险、
 「工作树里可能有长期未提交的重要改动」的检查清单、报告该怎么写）见
@@ -189,7 +205,7 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 
 | 文件 | 覆盖内容 |
 |---|---|
-| `references/proxy-runtime-freshness.md` | proxy 内存索引新鲜度、重启判据、stdout 块缓冲陷阱、重载链断链、进程内检索链路测试 |
+| `references/proxy-runtime-freshness.md` | proxy 内存索引新鲜度（含**正确的 token 级比对方法**）、重启判据、stdout 块缓冲陷阱、重载链断链、进程内检索链路测试 |
 | `references/upstream-url-migration.md` | 上游改 URL 路径的完整诊断流程（sitemap 查新路径 → 404/200 确认 → diff 判搬家 → refresh_drift 清孤儿 → 重启 proxy） |
 | `references/hermes-skill-proxy-deployment.md` | proxy 部署步骤、systemd unit 位置、`User=ecs-user` 等坑 |
 
@@ -369,6 +385,54 @@ cd <skill repo> && git status -sb
 
 看到 `M scripts/crawler.py` 或一批 `?? references/` / `?? scripts/*.py`，
 说明有重要改动没进版本库 → **提交并推送**，否则下次 pull 会静默回退。
+
+> ⚠️ **每轮都要独立跑这条检查** —— 上一轮报告说「已提交」不能替代本轮实测。
+> 2026-10-29 实测：10-28 报告写「已提交 `c7bbf5e`」，本轮 `git status` 仍有
+> 3 个文件 `M`（217 行）没进库。报告里的 commit hash 只证明「那个 commit 在库里」，
+> 不证明「工作树此刻干净」。
+
+### ⚠️ 无人值守 cron 下删文件会被审批卡住（2026-10-29 现场）
+
+清理 `/tmp` 压测残留时 `rm -f /tmp/proxy_*.py` 被拦：
+`⚠️ delete in root path. Asking the user for approval.` —— cron 场景**没人能批**。
+
+✅ **优先清进程**（`kill <PID>`）而不是清文件 —— 进程才是占端口/吃资源的实体，
+残留的 `.py`/`.log` 不占端口、不影响服务。确需删文件时，
+在报告里写明残留清单 + 理由，把决定权交回用户。
+
+> 💡 压测残留**最该盯的是进程和端口**。2026-10-29 检查：
+> `ss -ltnp | grep -E "864[0-9]"` 只有 8643 + 8642 → 端口干净 →
+> `/tmp` 里的 `.py` 残留不影响交付，可以放着。
+
+### ⚠️ 在 heredoc 里写 `&` 会被 terminal 拦下（2026-10-29 现场）
+
+`for k in dk & mk:` 会被安全扫描判成「前台命令用了后台符号」直接拒绝执行：
+
+```
+Foreground command uses '&' backgrounding. Use terminal(background=true) ...
+```
+
+✅ 改用集合方法：`dk.intersection(mk)` / `dk.difference(mk)` / `dk.union(mk)`。
+**heredoc 里也一样会被拦。**
+
+### ⚠️ 比对 proxy 内存索引与磁盘 index.json 必须用 token 级比对（2026-10-29 更正）
+
+proxy 的 `_doc_scores[name][path]` 存的是**分词后的 token 集合**
+（`title_tokens` / `desc_tokens` / `content_tokens` / `word_counts`），
+**不是原始字符串**。所以 `mem[k].get("title")` 恒为 `""` →
+`disk[k]["title"] != mem[k].get("title")` **恒为 True** → 558 条全是假阳性。
+
+✅ 正确做法：磁盘侧也用同一套 jieba 规则（`len(w) >= 2`）切词再比集合。
+完整可复制代码见 `references/proxy-runtime-freshness.md`。
+
+### ⚠️ 手写 slug 契约检查会崩在 `OSError [Errno 36]`（2026-10-29 现场）
+
+自己拼候选 md 文件名时若用 `quote(path, safe="")`，超长中文路径会超过
+Linux 255 字节上限 → `Path.exists()` 抛 `OSError: [Errno 36] File name too long`
+→ **检查脚本当场崩掉**（proxy 自己用 try/except 兜住了，线上不会挂）。
+
+✅ **复用 proxy 的 `_md_slug_candidates()`**，别自己复刻，并且 `except OSError: continue`。
+2026-10-29 实测复用后 558/558 全部解析成功。
 
 ### ⚠️ 引用链接双重编码 → 所有 cite 链接 404（2026-10-25 已修）
 
@@ -650,6 +714,49 @@ all_locs = [unescape(u) for u in re.findall(r'<loc>([^<]+)</loc>', xml)]
 
 修复后**用缓存重建**（不必 `--force`，那会丢掉全部 raw 缓存）：从 `raw/*.html`
 重新 `extract_content()` → 重写 md → 重建 index。见 `scripts/rebuild_from_cache.py`。
+
+> ⚠️ **2026-10-29：这两个修复原本只有本 KB 有，姊妹 KB `inexbot-open` 一直漏着**
+> （→ 它的 index 有 764 条 U+200B、39 条空标题）。
+> **教训：修 bug 前先 grep 姊妹 KB 的同名脚本**，有现成实现就直接移植，别从零重写。
+>
+> ⚠️ **字面零宽字符写进源码会被静默吞掉** —— 用编辑工具把 U+200B **字面量**
+> 写进字符集时，它无声地消失了（只剩 U+200C/U+200D/U+FEFF），不检查就上线会
+> **漏掉最常见的那个零宽字符**且无任何报错。
+> **字符集必须用显式 codepoint 构造**：
+> ```python
+> _ZERO_WIDTH = "[" + "".join(chr(c) for c in (0x200B, 0x200C, 0x200D, 0xFEFF)) + "]"
+> ```
+> 写完立刻 `print(repr(ln), [hex(ord(c)) for c in ln if ord(c) > 127])` 验证字符集没被吞。
+>
+> ⚠️ **改完抽取逻辑 → 离线重建 + 内容完整性核对（零网络）**：
+> `rebuild_from_cache.py` 跑两遍，第二遍必须 `rewritten=0`。
+> 但 **`rewritten=0` 只证明「确定性」，不证明「没改坏内容」** —— 必须额外做
+> **分词级 token 核对**（旧 token ⊆ 新 token，丢失数必须为 0）。
+> ⚠️ **别用 `content_snippet` 比对** —— 它是截断窗口，去掉一个 ZWSP 会让边界移动，
+> 长度变化是假象。要比对**未截断**的正文。
+> 2026-10-29 实测（姊妹 KB）：全量 799 页中 774 条完全一致、25 条仅空白差异、
+> **token 丢失数 = 0** ✅
+>
+> 详见姊妹 skill `inexbot-open-knowledge-base/references/index-hygiene-and-systemd-env-bugs.md`。
+
+### ⚠️ systemd `Environment=` 块写错 → 4 个环境变量被静默忽略（2026-10-29 修复）
+
+**两个 KB 共用同一个 proxy unit，所以这条对两边都成立。**
+
+unit 里若写成 `Environment=` 后跟缩进续行，**systemd 不认**（那是 shell `.env` 的写法）
+→ 它把 `PROXY_PORT=8643` 当成未知名的 directive key → **4 个变量全部被丢弃**。
+
+症状：journal 反复出现 `Unknown key name 'PROXY_PORT' in section 'Service', ignoring.`；
+`systemctl show hermes-skill-proxy -p Environment` 输出空。
+
+正确写法：**每行一个 `Environment="K=V"`**。
+验证：`systemd-analyze verify xxx.service`（**文件名必须以 `.service` 结尾**，
+否则报 `Invalid argument`，看起来像修复无效）。
+`/etc` 里的 `HERMES_API_KEY` 是被截断的占位符 `hermes...arch`，
+修 unit 时要**显式写代码默认值 `hermes-website-search`** 才能保持行为一致。
+
+完整分析见姊妹 skill `inexbot-open-knowledge-base/references/index-hygiene-and-systemd-env-bugs.md`
+与本 skill `references/kb-cron-verification-workflow.md` §6。
 
 ### proxy 没有独立的 /search endpoint
 
