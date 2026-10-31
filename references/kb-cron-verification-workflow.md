@@ -294,10 +294,14 @@ systemd-analyze verify /tmp/probe-fixed.service 2>&1 | grep probe-fixed
 > 用 `.fixed` / `.txt` 会报 `Failed to prepare filename ...: Invalid argument`，
 > 看起来像「修复无效」其实是文件名问题 —— 先 `cp` 成 `xxx.service` 再验。
 
-> ⚠️ **改 `HERMES_API_KEY` 前先比对**：`/etc` 部署版里曾是被截断的占位符
-> `hermes...arch`（len=13），与代码默认值 `hermes-website-search`（len=21）**不同**。
-> 因为原块被忽略，线上一直用代码默认值；**修 unit 时要显式写代码默认值**，
-> 否则 proxy 会改用一个错误的 key 去转发 gateway。
+> ⚠️ **改 `HERMES_API_KEY` 前先比对**（2026-10-31 更正）：
+> 旧文档说「`/etc` 部署版里是被截断的占位符 `hermes...arch`（len=13）」——
+> **那是本工具链的输出脱敏（redaction），不是文件里的真实内容**。
+> 实测：`char codes` 显示部署版 unit 里是完整的
+> `HERMES_API_KEY=hermes-website-search`（len=36 含前缀，值本身 len=21，
+> sha256 前 12 位 `23760f4462da`），**与代码默认值、gateway `config.yaml`
+> 的 `api_server.api_key` 三处一致**；渲染后的 repo 模板与 `/etc` 部署版**逐字节相同**。
+> **不要**因为看到省略号就去「修」这个 key —— 修之前必须用 sha 摘要比对。
 > 比对时用 sha 摘要，别把 key 明文打进日志。
 
 > ⚠️ 这个 unit 在 **proxy repo 模板 + `/etc/systemd/system/` 部署版各有一份**，
