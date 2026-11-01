@@ -16,10 +16,17 @@
 | 引用链接双重编码 | `/health` 全绿 | **回答里每个链接都 404** |
 | md slug 解析失败 | `/health` 全绿 | 正文静默降级成 800 字摘要，附图全丢 |
 | sitemap `&amp;` 未转义 | 558/558 成功 | 该页正文永久为空 |
+| **proxy 上游 timeout 太短** | **全绿**（health/检索/链接全 PASS） | **长手册类问题随机 502**（2026-10-31 实测 2/4 失败） |
 
 **所以 cron 的交付物应该是「验证闭环」**——爬取 → 漂移探针 → 检索链路实测 →
-链接可达性 → 修复 → 部署 → 回归。历史上两个 KB 的 cron 都在「爬取成功」就结束了，
-把上面那三个 bug 留了几周才被发现。
+链接可达性 → **真实端到端请求** → 修复 → 部署 → 回归。历史上两个 KB 的 cron 都在
+「爬取成功」就结束了，把上面那几个 bug 留了几周才被发现。
+
+> ⚠️ **2026-10-31 的教训**：前 4 类故障全都能被表层检查抓到，唯独
+> **「proxy 上游 timeout 太短」一个都抓不到** —— `/health` 绿灯、检索链路 PASS、
+> 引用链接 200，**全绿**，但用户拿到的就是 502。
+> **只有真正打一次完整请求（proxy → gateway → LLM）才会暴露。**
+> 所以 §5b 是**必需步骤，不是可选项**。
 
 ## 标准 cron 流程（6 步）
 
@@ -230,6 +237,43 @@ for r in mod.search_single_kb("inexbot", q, 30):
 # 判据：url 里 %25 数量 == 0，且逐条 curl 返回 200
 ```
 
+### 5b. 真实端到端请求（2026-10-31 新增，**唯一能抓到 timeout 类故障的检查**）
+
+**前 5 步全是「proxy 内部」检查 —— 它们无法发现「proxy → gateway → LLM」这条链路上的问题。**
+
+**2026-10-31 现场**：所有表层检查全绿（`/health` ok、检索链路 PASS、引用链接 12/12 HTTP 200、
+index IDENTICAL），但用户问「查冲压工艺手册参数」时**随机 502**。
+根因是 proxy 转发到 gateway 的 `timeout=120` 太短 —— **表层检查一个都抓不到**。
+
+**必须真打一次完整请求**（走 8643 → 8642 → LLM）：
+
+```bash
+# ⚠️ 客户端 -m 必须大于 proxy 的上游 timeout（现 300）→ 用 -m 360
+# ⚠️ 故意用不存在的 model，让 gateway 快速拒绝，从而快速区分两条路径
+curl -s -m 360 -o /dev/null -w '%{http_code} %{time_total}s\n' \
+  -X POST http://localhost:8643/v1/chat/completions \
+  -H 'Content-Type: application/json' -H 'Authorization: Bearer hermes-website-search' \
+  -d '{"model":"definitely-not-a-real-model-xyz","messages":[{"role":"user","content":"C1102 控制器 通讯接口 有哪些"}],"max_tokens":16}'
+```
+
+**判读表**（`POST /v1/chat/completions`）：
+
+| 现象 | 含义 | 动作 |
+|---|---|---|
+| **200** | 检索成功 + gateway 返回了 | ✅ |
+| **500** | 🔴 **检索真的崩了**（slug 契约断裂 / index 读取异常） | 查 `_md_slug_candidates()` 与 `slugify()` 契约 |
+| **502** | gateway 侧超时（**检索多半是成功的**） | 量网关真实耗时 → 与 proxy timeout 比对 |
+| `RemoteDisconnected` | 大概率被**并发 restart** 打断 | 查 PID + journal |
+| 000 | 客户端 `-m` 给太小 | 用 `-m 360` |
+
+> ⚠️ **「502」不一定是故障** —— 它也可能是 gateway 真的慢。
+> **判别方法**：直打 8642（绕过 proxy）量真实耗时。
+> 2026-10-31 实测：小 prompt 1.4s / 12k 字符 KB prompt 64s / 35k 字符 135–161s。
+> **真实耗时 > proxy 的 timeout → 必然 502，与 KB 无关** → 该调 timeout，不是查检索。
+
+> ⚠️ **单次成功不算通过** —— timeout 类故障是**随机**的（实测 4 次挂 2 次）。
+> **同一个问题连打 4 次，全部 200 才算通过。**
+
 ### 6. 回归 + 部署
 
 改动 proxy 代码后：`sudo systemctl restart hermes-skill-proxy`，
@@ -348,6 +392,29 @@ _warning: hermes-skill-proxy.py was modified by sibling subagent
 3. commit 前再 grep 一次关键函数名，两个 KB 的修复都要在
 4. 姊妹 KB 的 SKILL.md 里有同样的警告，**两边都要遵守**
 
+### ⚠️ `patch` 改含疑似密钥的行 → 会把代码**改坏**（2026-10-31 现场）
+
+**症状**：`patch` 改 `hermes-skill-proxy.py` 的配置区后，
+`ast.parse` 抛 `SyntaxError: unterminated string literal (detected at line 39)`，
+而**第 39 行是 agent 根本没碰过的那行**。
+
+**根因**：工具链的 **secret redaction** 把 `os.getenv("HERMES_API_KEY"` 替换成
+`os.get...EY`（中间省略形式），**并把这个被改写的文本真的写进了磁盘**。
+脱敏不只是「显示层」—— **它会污染 patch 的输入**。
+
+**对策（4 步）**：
+1. 改完**立刻** `ast.parse()` / `py_compile` 验证语法
+2. 语法报错行**不是**你改的那行 → 高度怀疑脱敏污染
+3. **从 git 取回那行**（`git show HEAD:file` → 按前缀筛出原行 → 替换），**不要重新手打**
+   —— 手打会再被脱敏一次
+4. 用 **`char codes`**（`[ord(c) for c in line]`）验证 —— 它不受脱敏影响
+
+完整可复制代码见 `SKILL.md` 的「patch 工具写含密钥的行会把代码改坏」一节
+与 `references/shared-proxy-service-pitfalls.md` §陷阱 9。
+
+> ⚠️ 同理，**看到输出里的 `hermes...arch` / `hermes...rch` 不要当成截断占位符** ——
+> 那是脱敏。先跑 sha 摘要 / char codes 比对再下结论，否则会去「修」一个没坏的东西。
+
 ## ⚠️ 工作树里可能有长期未提交的重要改动
 
 2026-10-25 发现：`crawler.py` 的 VitePress v2 alpha 迁移（sitemap 发现 +
@@ -448,7 +515,20 @@ ps aux | grep -E "proxy_reload|proxy-unbuf" | grep -v grep
 # ④ 线上 proxy 是否带最新补丁（补丁 mtime 晚于进程启动 = 没带）
 stat -c '%y %n' /home/ecs-user/hermes-skill-proxy/hermes-skill-proxy.py
 ps -o pid,lstart,etime -p $(pgrep -f hermes-skill-proxy.py | head -1)
+
+# ⑤ 真实端到端请求（唯一能抓到 timeout 类故障的检查，见 §5b）
+#    ⚠️ -m 360（> proxy 的 300s 上游 timeout）；同一问题连打 4 次，全 200 才算过
+for i in 1 2 3 4; do
+  curl -s -m 360 -o /dev/null -w "%{http_code} %{time_total}s\n" \
+    -X POST http://localhost:8643/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -H 'Authorization: Bearer hermes-website-search' \
+    -d '{"model":"definitely-not-a-real-model-xyz","messages":[{"role":"user","content":"C1102 控制器 通讯接口 有哪些"}],"max_tokens":16}'
+done
 ```
+
+> ⚠️ 第 ⑤ 项**不是可选项** —— 2026-10-31 证明：其他所有检查全绿的情况下，
+> 用户仍可能拿到 502。**timeout 类故障是随机的**，单次 200 也不能证明通过。
 
 > ⚠️ 第 ② 项若看到**姊妹 KB** 的 repo 有未提交改动 —— **不要替它提交**。
 > 姊妹 KB 的 cron 正在跑（同一时刻 11:00），它的改动归它自己收尾。

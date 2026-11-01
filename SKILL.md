@@ -1,8 +1,8 @@
 ---
 name: inexbot-knowledge-base
 description: "纳博特科技知识库 RAG：每天定时爬取 doc.inexbot.com，由 hermes-skill-proxy 在请求时进行内存检索并注入 system prompt。"
-version: 2.10.0
-last_verified: 2026-10-31
+version: 2.12.0
+last_verified: 2026-11-01
 author: Hermes Agent
 license: MIT
 metadata:
@@ -115,6 +115,7 @@ python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/crawler.py 
 | `scripts/rebuild_from_cache.py` | 改清洗逻辑后，从 `raw/` 缓存重建 md + index（不联网） |
 | `scripts/refresh_drift.py` | **全量漂移刷新**：重抓全部页面，只覆盖真变了的内容（2026-10-24 新增） |
 | `scripts/verify_kb.py` | **全量回归**：索引完整性 + slug 契约 + 检索链路 + 引用链接实网可达性（2026-10-25 新增） |
+| `scripts/check_e2e_request.py` | **端到端请求探针**（2026-10-31 新增）：proxy→gateway→LLM 真实打一次，连打 N 次，**唯一能抓到 timeout 类故障的检查** |
 
 **改了 `crawler.py` 的 `slugify()` 或清洗逻辑后**，不要直接 `--force`（会清空 raw 缓存、
 重抓 558 页），用 `rebuild_from_cache.py` 即可。之后跑 `check_crawl_state.py` 验证。
@@ -126,7 +127,7 @@ python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/crawler.py 
 md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感**，
 而它们的共同特征是：**所有表层健康检查全绿，但用户拿到的是坏结果**。
 
-**标准 cron 流程（6 步）**：
+**标准 cron 流程（7 步）**：
 
 0. **先读上一轮的待办**（`hermes cron list` 的 `Last run` 字段含上一轮报告全文）——
    上一轮列的「待办 / 未完成」就是本次的前置任务，清不掉就别声称已修复
@@ -135,6 +136,8 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 3. 索引完整性对账（零长度 snippet / `Not Found` / 空标题 / 裸 `%` / slug 契约）
 4. 检索链路实测 —— `content_snippet` 长度判据（>800 正文命中，==800 静默降级）
 5. **引用链接实网可达性**（`/health` 绿灯 ≠ 用户点得到链接）
+5b. **真实端到端请求**（proxy → gateway → LLM）—— ⚠️ **唯一能抓到 timeout 类故障的检查**，
+    2026-10-31 证明其他检查全绿时用户仍可能拿到 502；**同一问题连打 4 次全 200 才算过**
 6. 修复 → 部署 → 回归
 
 > ⚠️ **第 0 步为什么不能省**：2026-10-28 发现 10-27 那轮的 4 条待办
@@ -182,6 +185,13 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 /usr/bin/python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/verify_kb.py
 ```
 
+**端到端探针**（第 5b 步，唯一能抓到 timeout 类故障的检查）：
+
+```bash
+/usr/bin/python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/check_e2e_request.py
+# 退出码 1 = 有非 200；--gateway-probe 额外量网关真实耗时；--query 可自定义
+```
+
 > ⚠️ 必须用 `/usr/bin/python3`（沙盒 `python3` 没装 flask）。
 > 脚本会实网 curl，每个 KB 抽 12 条 URL，耗时约 20–40 秒。
 > 退出码 1 = 有 FAIL，可直接用于 cron 判定。
@@ -220,8 +230,9 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 
 | 文件 | 覆盖内容 |
 |---|---|
-| **`references/shared-proxy-service-pitfalls.md`** | ⭐ **两个 KB 共用的 proxy 服务运维坑（跨 KB 权威来源）**：并发 restart 打断探针、restart 后健康检查必须重试、HTTP 状态码判读表、并发 commit 良性竞态、commit message 必须纯 ASCII（tirith `confusable_text`）、policy 拦截总清单、**§陷阱 9：终端输出里 `hermes...arch` 是脱敏不是截断**、基线速查 |
-| **`references/crawl-state-2026-10-31.md`** | 本 KB 最新基线快照：558 篇 / index 1,722,769 bytes / IDENTICAL / token 级 0 不一致 / 端到端 502=检索成功 / **脱敏误判的实证与更正** |
+| **`references/shared-proxy-service-pitfalls.md`** | ⭐ **两个 KB 共用的 proxy 服务运维坑（跨 KB 权威来源）**：并发 restart 打断探针、restart 后健康检查必须重试、HTTP 状态码判读表、并发 commit 良性竞态、commit message 必须纯 ASCII（tirith `confusable_text`）、policy 拦截总清单、**§陷阱 9：终端输出里 `hermes...arch` 是脱敏不是截断**、**§陷阱 10：proxy 上游 120s timeout → 查手册类问题随机 502（已修）**、**§陷阱 11：漏拼 `.md` 后缀 → 0/558 假阳性**、**§陷阱 12：journal 500/502 计数必须按进程启动时间切片**、基线速查 |
+| **`references/crawl-state-2026-11-01.md`** | ⭐ **本 KB 最新基线快照**（2026-11-01）：558 篇 / index 1,722,769 bytes / IDENTICAL / slug 契约 558/558 / token 级 0 不一致 / 短 snippet 静默降级 0 / **端到端 12/12 全 200（最慢 144.7s → 证明 300s timeout 补丁仍承重）** / 上一轮成果跨 session 泄漏未提交的实证 |
+| **`references/crawl-state-2026-10-31.md`** | 10-31 基线快照：558 篇 / index 1,722,769 bytes / IDENTICAL / token 级 0 不一致 / **端到端实测揪出 120s timeout 缺陷并修复** / 脱敏误判的实证与更正 |
 | `references/proxy-runtime-freshness.md` | proxy 内存索引新鲜度（含**正确的 token 级比对方法**）、重启判据、stdout 块缓冲陷阱、重载链断链、进程内检索链路测试 |
 | `references/upstream-url-migration.md` | 上游改 URL 路径的完整诊断流程（sitemap 查新路径 → 404/200 确认 → diff 判搬家 → refresh_drift 清孤儿 → 重启 proxy） |
 | `references/hermes-skill-proxy-deployment.md` | proxy 部署步骤、systemd unit 位置、`User=ecs-user` 等坑 |
@@ -319,13 +330,14 @@ doc.inexbot.com 上很多「常见问题/伺服报错」系列的页面就是 1�
 
 ## 长手册型主题（整本操作手册 300–800 行）
 
-另一类主题不是「几百条散页」而是「**一本厚手册**」（例：冲压工艺 2.0 手册 636 行、3.0 手册 330 行、JSON 协议工艺章 2183 行）。这类**不能靠 proxy 注入的 snippet**（上限 ~4000 字符）拼出来，必须读 md 全文。
+另一类主题不是「几百条散页」而是「**一本厚手册**」（例：冲压工艺 2.0 手册 636 行、3.0 手册 330 行、JSON 协议工艺章 2097 行）。这类**不能靠 proxy 注入的 snippet**（上限 ~4000 字符）拼出来，必须读 md 全文。
 
 **标准取数路线**（见 `references/large-family-kb-navigation.md` §7）：
 1. **一次扫 `index.json` 的 `value.title`** → 列出该主题的全部页面 + 官方链接 + md 位置（比逐个 read_file 试错快一个数量级）。
 2. `wc -l` 确认体量 → 分段 `read_file(offset=…, limit=…)` 或 `sed -n 'a,bp'`。
 3. **多代手册并存**（代次常只在标题末尾，如「冲压工艺2.0手册」/「冲压工艺3.0手册」）：按 title 包含匹配一次列全 → 回答开头先声明有哪几代、参数名不同 → 再按代次分节。
 4. **版本边界自己核**：扫 index 标题就知道某手册只存在于哪个固件版本（例：冲压工艺手册只有 22.07 的 2.0/3.0 两册，24.03/25.01 未收录）→ 别在别的版本上类推参数名，答案末尾写「其他版本 KB 未收录 → 无法确认」。
+5. **⚠️ 别把文件名当版本归属（2026-11-01 实测）**：冲压工艺 2.0/3.0 手册的 md 文件名是 `zh-操作手册-专机手册-冲压专机-冲压工艺{2.0,3.0}手册.md`，**不含「22.07版本」字样**（早期在 22.07 子目录，上游 2026-10-27 搬到了「专机手册/冲压专机」）。同时 22.07 的 `zh-操作手册-22.07版本-专用工艺手册.md` 看起来像「各工艺专章」，但 **grep「冲压」= 0 命中**，不含冲压内容 → **判定某工艺属于哪一版，必须用 index.json 标题全量扫 + grep 正文关键词，不能靠文件名猜**。
 
 ## 常见陷阱
 
@@ -543,7 +555,7 @@ RemoteDisconnected: Remote end closed connection without response
 |---|---|
 | **500** | 检索真的崩了（slug 契约断裂 / index 读取异常） |
 | **RemoteDisconnected** | ⚠️ **大概率被并发 restart 打断** → 先 `ps` / `systemctl status` 看 PID 是否刚变 |
-| 000（客户端 timeout） | 客户端 `-m` 给太小，proxy read timeout 是 120 → 用 `-m 240` |
+| 000（客户端 timeout） | 客户端 `-m` 给太小，proxy 上游 read timeout 现为 **300**（2026-10-31 起，原 120）→ 客户端用 `-m 360` |
 | 502 | gateway 侧超时，检索成功 |
 
 2026-10-30 实测：PID 从 1779750 变成 1779868，且 journal 里有 `Stopping/Started` → 确认是姊妹 KB 并发 restart。
@@ -551,6 +563,96 @@ RemoteDisconnected: Remote end closed connection without response
 > ⚠️ **姊妹 KB 与本 skill 的 cron 都定在 11:00**，两边都会 restart 同一个 proxy。
 > 你 restart 完不到一分钟就可能被对方再 restart 一次 —— 看到 `RemoteDisconnected`
 > 先查 PID，别急着改代码。
+
+### ⚠️ proxy 上游 read timeout 120s 太短 → 查手册类问题**随机 502**（2026-10-31 已修）
+
+**这是真实影响用户的缺陷**（不是 KB 内容问题）。
+
+**症状**：用户问「查冲压工艺手册参数」这类**会命中长手册**的问题时，**随机**返回 HTTP 502：
+
+```json
+{"error": {"message": "HTTPConnectionPool(host='localhost', port=8642): Read timed out. (read timeout=120)"}}
+```
+
+**⚠️ 502 ≠ 检索崩了**（那是 500）—— **检索成功了，是网关返回得比 proxy 等待得慢**。
+
+**根因**：proxy 转发到 gateway 时**硬编码 `timeout=120`**，但 KB 检索后注入的 system prompt
+约 **12k–20k 字符**，gateway 实测需 **30–140s** 才返回（长手册类查询更慢）。
+
+**实测证据**（同一问题连打 4 次）：**2/4 失败**（2 次精确卡在 120.1s），
+成功的 2 次是 44s / 30s —— **随机超时，不是必然失败**，极易被误判成「偶发网络问题」。
+
+**修复**（proxy repo commit `a331618`，已 push + 已部署）：
+
+```python
+# 可配置，默认 300s
+HERMES_TIMEOUT = int(os.getenv("HERMES_TIMEOUT", "300"))
+...
+resp = requests.post(..., timeout=HERMES_TIMEOUT, stream=True)
+```
+
+**修复后实测**：**4/4 成功**（30.0s / 27.9s / 83.7s / 91.2s）；
+长手册 / 示教器手册 / 控制器典型查询**全部 HTTP 200**。
+
+> 💡 **判读要点**：看到 502 + `read timeout=120`，**先量网关真实耗时**再决定要不要查检索：
+> 直打 8642（绕过 proxy），小 prompt 1.4s / 12k 字符 64s / 35k 字符 135–161s。
+> **真实耗时 > proxy 的 timeout 就必然 502，与检索无关。**
+>
+> ⚠️ 客户端 `-m` 必须**大于** proxy 的 timeout（现 300）→ 用 **`-m 360`**，
+> 否则拿到的是客户端 000 而不是 502。
+
+> ⚠️ **为什么表层检查发现不了**：`/health` 绿灯、检索链路 PASS、引用链接 200
+> —— **全部与这个缺陷无关**。**只有真正打一次完整请求（proxy → gateway）才会暴露。**
+> cron 的验证闭环必须包含**至少一次真实端到端请求**。
+
+> 📌 完整版见 `references/shared-proxy-service-pitfalls.md` §陷阱 10。
+
+### ⚠️ `patch` 工具写含密钥的行会把代码**改坏** → 从 git 取原始行修复（2026-10-31 现场）
+
+**症状**：用 `patch` 改 `hermes-skill-proxy.py` 时，`old_string` 里含
+`HERMES_API_KEY = os.getenv("HERMES_API_KEY", "...")` 这种**疑似密钥**的行，
+patch 成功后该行变成了：
+
+```
+HERMES_API_KEY=os.get...EY", "hermes-website-search")
+```
+
+→ `ast.parse` 直接抛 `SyntaxError: unterminated string literal (detected at line 39)`。
+
+**根因**：**与 §陷阱 9 同源** —— 工具链的 secret redaction 把 `os.getenv("HERMES_API_KEY"` 
+替换成了 `os.get...EY`（中间省略形式），**并把这个被改写的文本真的写进了磁盘**。
+脱敏不只是「显示层」，**它会污染 patch 的输入**。
+
+**✅ 正确对策：不要手打含密钥的行，从 git 取原始行**：
+
+```python
+import ast, subprocess
+from pathlib import Path
+
+REPO = Path("/home/ecs-user/hermes-skill-proxy")
+WORK = REPO / "hermes-skill-proxy.py"
+
+# 从 git HEAD 取回未被脱敏的原始文件（不手打 → 不经过脱敏）
+pristine = subprocess.check_output(
+    ["git", "-C", str(REPO), "show", "HEAD:hermes-skill-proxy.py"]).decode("utf-8")
+good = [l for l in pristine.splitlines()
+        if l.startswith("HERMES_API_KEY") and "getenv" in l][0]
+
+lines = WORK.read_text(encoding="utf-8").splitlines()
+for i, ln in enumerate(lines):
+    if ln.startswith("HERMES_API_KEY") and "getenv" not in ln:
+        lines[i] = good          # ← 用 git 里的原样行替换
+WORK.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+ast.parse(WORK.read_text(encoding="utf-8"))   # 必须重新验证语法
+print("repaired")
+```
+
+> 💡 **通则**：**patch 涉及含疑似密钥的行时** ——
+> ① 改完之后**立刻** `ast.parse` / `py_compile` 验证语法；
+> ② 语法报在**你没碰过的那行** → 高度怀疑是脱敏污染；
+> ③ 修法是**从 git / 磁盘原文件取回那行**，不是重新手打（手打会再被脱敏一次）；
+> ④ 验证用 **`char codes`**（`[ord(c) for c in line]`）——它不受脱敏影响。
 
 ### ⚠️ 姊妹 KB 与本 skill 会并发 commit 同一个 proxy repo（2026-10-30）
 

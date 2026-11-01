@@ -79,7 +79,7 @@ proxy 的 `proxy_request()` 里 **`search_all_kb()` 在转发到 gateway 之前�
 |---|---|---|
 | **500** | 🔴 **检索真的崩了**（slug 契约断裂 / index 读取异常） | 查 `_md_slug_candidates()` 与 crawler `slugify()` 契约 |
 | **RemoteDisconnected** | ⚠️ **大概率被并发 restart 打断** | 查 PID + journal（陷阱 1） |
-| **000**（客户端 timeout） | 客户端 `-m` 给太小 | proxy read timeout 是 **120** → 用 `-m 240` |
+| **000**（客户端 timeout） | 客户端 `-m` 给太小 | proxy 上游 read timeout 现为 **300**（2026-10-31 起，原 120）→ 客户端用 `-m 360` |
 | **502** | gateway 侧超时 | 检索成功，与 KB 无关 |
 | **200** | 检索成功 + gateway 返回了 | ✅ 但**别把 200 当唯一判据** —— 见下 |
 
@@ -227,7 +227,117 @@ print("hermes-website-search" in key)        # ← 布尔判断也不受影响
 
 ---
 
-## 附：两个 KB 的基线速查（2026-10-31）
+## 陷阱 10：proxy 上游 read timeout **120s 太短** → 查手册类问题随机 502（2026-10-31 修复）
+
+**症状**：用户问「查冲压工艺手册参数」这类**会命中长手册**的问题时，
+**随机**返回 HTTP 502，body 是：
+
+```json
+{"error": {"message": "HTTPConnectionPool(host='localhost', port=8642): Read timed out. (read timeout=120)"}}
+```
+
+**⚠️ 这不是检索崩了**（那是 500）—— **检索成功了，是网关返回得比 proxy 的等待时间慢**。
+
+**根因**（2026-10-31 实测）：proxy 转发到 gateway 时硬编码 `timeout=120`，
+但 KB 检索后注入的 system prompt 约 **12k–20k 字符**，gateway 实测需要
+**30–140s** 才返回（长手册类查询更慢）。
+
+**实测证据**（同一问题连打 4 次）：**2/4 失败**（2 次精确卡在 120.1s），
+成功的 2 次是 44s / 30s —— **是随机超时，不是必然失败**，所以极易被误判成「偶发网络问题」。
+
+**修复**（proxy repo commit `a331618`，已 push + 已部署）：
+
+```python
+# 可配置，默认 300s
+HERMES_TIMEOUT = int(os.getenv("HERMES_TIMEOUT", "300"))
+...
+resp = requests.post(..., timeout=HERMES_TIMEOUT, stream=True)
+```
+
+**修复后实测**：同一问题 **4/4 成功**（30.0s / 27.9s / 83.7s / 91.2s）；
+三类查询（长手册 / 示教器手册 / 控制器典型查询）**全部 HTTP 200**。
+
+> 💡 **判读要点**：看到 502 + `read timeout=120`，**先量网关真实耗时**再决定要不要查检索：
+> ```bash
+> # 直接打 gateway（绕过 proxy），用真实注入量级的 system prompt
+> # 实测：小 prompt 1.4s；12k 字符 KB prompt 64s；35k 字符 135–161s
+> ```
+> 只要 **真实耗时 > proxy 的 timeout**，就必然 502 —— 与检索无关。
+
+> ⚠️ **客户端 `-m` 要比 proxy 的 timeout 更大**，否则拿到的是客户端 000 而不是 502。
+> timeout 已是 300 → 客户端用 **`-m 360`**。
+
+---
+
+## 陷阱 11：自己拼 md 文件名 → 漏掉 `.md` 后缀 → **0/558 假阳性**（2026-11-01 实测）
+
+**症状**：自写 slug 契约检查脚本报
+
+```
+resolved: 0 / 558
+UNRESOLVED (558): /zh/ ... /zh/%E4%BA%A7%E5%93%81...
+```
+
+看起来像「proxy 与 crawler 的 slug 契约断裂了」—— **但线上其实完全正常**。
+
+**根因**：proxy 的 `_md_slug_candidates(path)` 返回的是**不带 `.md` 后缀的 slug**，
+调用方要自己拼后缀。proxy 内部是这么用的：
+
+```python
+for slug in _md_slug_candidates(path):
+    cand = md_dir / f"{slug}.md"      # ← 后缀在这里
+```
+
+**✅ 正确写法**：
+
+```python
+for slug in mod._md_slug_candidates(k):
+    if (MD / (slug + ".md")).exists():   # ← 必须自己拼 ".md"
+        ok = True
+        break
+```
+
+> 💡 **判据**：如果「检索链路实测」正常（`snippet_len=4000`、正文命中），
+> 但「slug 契约」报 0/558 —— **几乎一定是自己的检查脚本写错了，不是契约断裂**。
+> 契约真断裂的表现是**检索侧**出现 800 字静默降级或 HTTP 500，不是这个。
+
+> ⚠️ 另：`_md_slug_candidates()` 可能返回**超长**文件名候选 →
+> `Path.exists()` 会抛 `OSError [Errno 36]` → 必须 `except OSError: continue` 兜住，
+> 否则**检查脚本自己**先崩掉。
+
+---
+
+## 陷阱 12：journal 的 500/502 计数**必须按进程启动时间切片**（2026-11-01 实测）
+
+**症状**：跑
+
+```bash
+sudo -n journalctl -u hermes-skill-proxy.service --no-pager | grep -c '" 500 -'
+```
+
+得到 **606**，而当前进程明明健康 —— 差点误判成「今天在疯狂 500」。
+
+**根因**：`journalctl -u <unit>` 统计的是**该 unit 的全部历史**，
+跨越几十次进程重启（每次部署一个新 PID）。历史故障被算到了今天头上。
+
+**✅ 正确做法**：用**当前 proxy 进程的启动时间**切片：
+
+```bash
+PID=$(pgrep -f hermes-skill-proxy.py | head -1)
+START=$(ps -o lstart= -p "$PID")     # 例如 "Sat Oct 31 11:36:48 2026"
+sudo -n journalctl -u hermes-skill-proxy.service --since "$START" --no-pager \
+  | grep -c '" 500 -'
+```
+
+2026-11-01 实测（PID 1792095，启动于 2026-10-31 11:36:48）：
+`Unknown key name` = **0**、HTTP 500 = **0**、HTTP 502 = **0**、重载记录 = 2。
+
+> ⚠️ 反过来也要小心：**只看「当前进程」会漏掉「进程刚重启」掩盖掉的问题**。
+> 正确姿势是**两个都看**：全量历史（判断有没有老问题）+ 按进程切片（判断当前状态）。
+
+---
+
+## 附：两个 KB 的基线速查（2026-11-01）
 
 | KB | 站点 | docs | index.json 字节 | locale 拆分 |
 |---|---|---|---|---|

@@ -31,6 +31,35 @@
 > 早前版本本文件曾写「16 路 DI + 16 路 DO / 1 路 CAN」——那是 **C1201** 的规格（见下节），**C1102 无此数据**。
 > 需要 C1102 的板载 DI/DO 数量与 CAN 口数量时，须向纳博特索取 C1102 硬件规格书/接线图，**不要**把 C1201 的数值套用。
 > 另注意：C1102 通讯协议列表里**没有 CANopen**（该协议是控制器主站侧的总线类型之一，勿与板载 CAN 串行口混淆）。
+> ⚠️ **CAN 路数官方材料自相矛盾**：C1102 参数表无 CAN 行，但 C1201 的 Q&A 写「C1201 接口更丰富
+> （3 路 Ethernet vs 1 路，**2 路 CAN vs 1 路**）」，暗示 C1102 有 1 路 CAN → 需向纳博特确认，勿单选一方。
+> ⚠️⚠️ **C1102 同一份产品资料内部还有第二处矛盾（2026-10-31 发现）**：
+> 「通讯协议」行按型号列**不含 CANopen**，但同页「技术架构」节写
+> 「NRC 系列机器人控制器采用 **EtherCAT、Canopen 总线**实现伺服主从站连接」——
+> 这是系列级口径表述，与型号级协议行冲突。回答「C1102 支不支持 CANopen」时**不能简单答不支持**，
+> 必须写明这处矛盾 + 板载 CAN 口路数无法确认 → 索取硬件规格书。
+> ⚠️ **C1102 产品参数表也没有 IO 行，但不代表接不了 IO** —— 扩 IO 走 EtherCAT IO 模块（见下）。
+
+### C1102 通讯接口速览（2026-10-31 补充）
+
+完整应答骨架见 `robot-control-systems-rd` skill 的 `references/controller-communication-interfaces.md`。
+此处只留速查要点：
+
+- **只有 2 个网口**（1×EtherCAT + 1×Ethernet）→ 多工业协议并发时网口是瓶颈，
+  EtherCAT 留给伺服、通用 Ethernet 留给上位机 JSON 协议（5000/6000/7000）。
+- **扩 IO 的确定方案** = 纳博特自有 EtherCAT IO 模块系列：R2C / R4C / R4D / R5B
+  （100Mbps，DIN 35mm，24V DC，IP20，-10℃~55℃）。见 `md/zh-产品资料-现场总线IO-README.md`。
+  选型明细（2026-10-31 核对子产品文档）：**R2C** 72×140mm / 16DI+16DO(MOS) / 支持 DC /
+  最小通信周期 200µs / 0~60°C；**R4C·R4D** 122×200mm，额外 2×AI + 2×AO + 编码器 + CAN 扩展；
+  **R5B** 116×210.9mm，20 路 DO（16 晶体管 + 4 继电器）+ 模拟量 + 编码器。
+- **Profinet 排查三条**：2207 有 PN 开关界面 / 2403 无开关直接连（Q31）；
+  PN 连接失败会导致连接断开（Q32）；PN 跑直线指令断开 → 增大 PN 通讯周期（Q34）。
+- **TCP 自定义协议**：示教器「设置-外部通讯-TCP通讯设置」，支持 **9 个工艺号**，
+  参数含连接方式 / IP / 端口 / 帧头 / 分隔符 / 结束符 / 进制。
+- ⚠️ **Modbus 地址映射表（`md/zh-技术资料-通讯协议&地址码.md`）是为 C2200 系列写的**，
+  该文档「概述」开头即写「纳博特 C2200 系列控制器支持多种工业通讯协议」。
+  C1102 是否一致 → **无法确认**，以控制器随附的 Modbus 地址映射表为准。
+
 
 ## C1200
 
@@ -101,9 +130,30 @@ C1200 的真实接口规格：向纳博特索取 C1200 产品资料或硬件规�
 
 ## 通用通讯协议
 
-所有型号均支持：EtherCAT、ModbusTCP/ModbusRTU、TCP/IP、FinsTCP、OPC-UA、Ethernet/IP（部分型号）
+各型号**协议清单不同**，必须逐型号照抄其产品资料「通讯协议」行，不要套用通用列表：
+- C1102：EtherCAT、Profinet、Ethernet/IP、OPC-UA、FinsTCP、TCP/IP、ModbusTCP、ModbusRTU
+- C1201：EtherCAT、Profinet、Ethernet/IP、CAN、OPC-UA、FinsTCP、TCP/IP、ModbusTCP、ModbusRTU
+- C2200 系列：EtherCAT + CANopen（总线侧），协议清单见其产品资料
+
+⚠️ **Profinet 只在部分型号清单里出现**（C1102 / C1201 有，C2200 那行没写）→ 「所有型号均支持」是错的。
+⚠️ **协议支持 ≠ 有独立物理口**：协议走 Ethernet 还是 RS485 取决于型号的网口/串口数量，
+C1102 只有 2 个网口 → 并发能力受限（见上文 C1102 通讯接口速览）。
 
 ## 注意事项
 
 - 知识库产品资料中**不包含接线图**，如需接线图请联系纳博特技术支持或下载官方资料包
 - 产品外观/尺寸图片也无法从知识库获取，见 `references/product-images.md`
+
+## 已核验的官方链接（2026-10-31 由 index.json 生成，可直接引用）
+
+- 工业机器人控制器 C1102 →
+  `https://doc.inexbot.com/zh/%E4%BA%A7%E5%93%81%E8%B5%84%E6%96%99/%E6%8E%A7%E5%88%B6%E7%B3%BB%E7%BB%9F/%E5%B7%A5%E4%B8%9A%E6%9C%BA%E5%99%A8%E4%BA%BA%E6%8E%A7%E5%88%B6%E5%99%A8C1102`
+- 现场总线IO模块 →
+  `https://doc.inexbot.com/zh/%E4%BA%A7%E5%93%81%E8%B5%84%E6%96%99/%E7%8E%B0%E5%9C%BA%E6%80%BB%E7%BA%BFIO/README`
+- 通讯协议与地址码 →
+  `https://doc.inexbot.com/zh/%E6%8A%80%E6%9C%AF%E8%B5%84%E6%96%99/%E9%80%9A%E8%AE%AF%E5%8D%8F%E8%AE%AE&%E5%9C%B0%E5%9D%80%E7%A0%81`
+- 通讯与总线常见问题 →
+  `https://doc.inexbot.com/zh/%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98/%E9%80%9A%E8%AE%AF%E4%B8%8E%E6%80%BB%E7%BA%BF`
+
+⚠️ doc 侧 index.json 的 key 已是百分号编码 → **直接拼，不要再 urlencode**；
+「通讯协议与地址码」那条 key 里含 `&`，Markdown 链接中要原样保留，不要转义成 `%26`。
