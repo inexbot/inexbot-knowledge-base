@@ -137,6 +137,14 @@ SUMMARY: 12/12 succeeded
 | 进程环境变量 | `PROXY_PORT` / `HERMES_URL` / `HERMES_API_KEY` / `SKILL_NAME` **4 个全部到位** |
 | 端口占用 | 仅 8643（proxy）+ 8642（gateway），无遗留压测进程 |
 | proxy 仓库 | `a331618`，工作树 clean，与 `origin/main` 同步 |
+| **重载链存活** | 定时器线程创建于 **2026-11-02 08:37:20**（`ps -L` 可见），5 小时周期正常重排 |
+
+> ⚠️ journal 里 `Total: 1357 docs` 的重载记录本轮显示 **0**，但这**不代表重载链断了** ——
+> systemd 下 stdout 是**块缓冲**（见 `proxy-runtime-freshness.md`），
+> 小段输出会攒在用户态缓冲区。**真正的判据是 `ps -L` 看定时器线程的创建时间**：
+> 线程 TID 1809513 创建于 11-02 08:37:20，早于本轮 11:02 的爬取
+> 且晚于上一次重排，说明链条健在。
+> 同时源码里的 `try/except/finally` 补丁（`schedule_reload()`）在运行进程中已生效。
 
 ### 2.6 引用链接实网可达性（补充抽样，含 `&` 风险区）
 
