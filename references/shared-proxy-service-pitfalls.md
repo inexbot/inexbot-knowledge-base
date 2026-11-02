@@ -337,6 +337,97 @@ sudo -n journalctl -u hermes-skill-proxy.service --since "$START" --no-pager \
 
 ---
 
+## 陷阱 13：**姊妹 KB 的 agent 会直接改你 skill 自己的 SKILL.md**（2026-11-01 实测）
+
+**这是陷阱 4「并发 commit」的升级版 —— 不只是 proxy repo 的文件会被并发改，
+**本 skill 的 `SKILL.md` 本身也会被姊妹 KB 的 agent 改**。
+
+**现象**（2026-11-01 实测）：我在给 `SKILL.md` 打 version 补丁时，工具返回：
+
+```
+_warning: /home/ecs-user/.hermes/skills/productivity/inexbot-knowledge-base/SKILL.md
+          was modified by sibling subagent 'b3c9f7dc-...' but this agent never read it.
+```
+
+`git diff` 显示对方的改动**已经在工作树里**了（新增了「长手册别把文件名当版本归属」
+那一节，改了 JSON 协议工艺章行数 2183→2097），而这些**我此前从未读过**。
+
+**⚠️ 危害**：如果直接 `patch` + `commit`，可能把对方的改动**覆盖掉**；
+如果直接 `edit`（全文重写），更会把对方刚写的内容**整段抹掉**。
+
+**✅ 对策（4 步）**：
+
+1. **看到 `_warning: ... was modified by sibling subagent` 就停一下**，
+   不要假装没看见
+2. `git diff --stat` + `git diff <file> | grep '^+'` **看清对方加了什么**
+   （本轮正是靠这个发现对方补了长手册文件名陷阱）
+3. 判断**内容是否冲突**：
+   - 不冲突 → **在对方改动之上增量 patch**（本轮把 version 2.11.0→2.12.0
+     和 references 表格行叠在对方的新内容旁，零冲突）
+   - 冲突 → **不要覆盖**，在报告里点名，交给姊妹 KB 的 cron 收尾
+4. `git diff` 复核对方的改动**仍在** → 再 `git add` + `commit`
+
+> 💡 **通则**：两个 KB 的 cron 都定在 11:00，**它们会写进彼此的 skill 目录**。
+> 看到 `_warning: ... modified by sibling subagent` 时，
+> 把它当成「**先读对方改动，再决定怎么写**」的信号，而不是错误提示。
+>
+> ⚠️ 与陷阱 4 区分：
+> - 陷阱 4 = 并发 commit **同一处** → 🟢 良性，内容一致谁先提交都一样
+> - 本陷阱 = 并发改**不同位置** → 🟡 需要先读再叠加，**别覆盖**
+> - 陷阱「两个 cron 会并发改同一个 proxy 文件」= 改**同一文件同一处** → 🔴 必须 `git diff` 复核
+
+---
+
+## 陷阱 14：cron 报告写「遗留：无」但**工作其实没提交**（2026-11-01 实测）
+
+**这是陷阱 13 的另一个面**：姊妹 KB 的 agent 会改你的文件，而**你自己**也可能
+「改完了、文档写了、报告发了 —— 但没 `git add` / `commit` / `push`」。
+
+**现象（2026-11-01，发生在 `inexbot-open` 那一侧）**：10-31 那轮报告最后一节写着
+「## 遗留 **无**」，但实际 `git status` 显示 **3 处已完成的工作没提交**：
+
+```
+M SKILL.md                                ← 新增「标准验证序列」章节
+M references/crawl-state-2026-10-31.md   ← 新增 §④ §⑤ 两节
+M scripts/check_staleness.py              ← 修了 slugify 漏 `|`
+?? scripts/check_index_hygiene.py         ← 10-29 三修的自动化守卫，压根没入库
+```
+
+> ⚠️ 2026-11-02 实测：**同样的事情在 `inexbot`（本 KB）这一侧又发生了一次** ——
+> 11-01 那轮报告写「最终仓库状态干净，本地与远程 SHA 一致」，
+> 但本轮 `git status` 独立实测显示 **3 个文件未提交**
+> （`SKILL.md` + `kb-cron-verification-workflow.md` + `shared-proxy-service-pitfalls.md`）。
+> **姊妹 KB 侧的原始案例 + 本 KB 侧的复现案例，两侧互为镜像。**
+
+**⚠️ 为什么这是真故障，不只是「忘了提交」**：
+未提交 = **下次 `git pull` 静默回退**。具体后果 ——
+`check_index_hygiene.py` 是 **10-29 三修**（零宽字符 / 空标题 / 幻影 token）的
+**唯一自动化守卫**。它没入库 → 下次 `git pull` 后文件消失 →
+**三修悄悄失去守卫**，而三修本身还在 `crawler.py` 里，
+**看起来一切正常**，直到有人手写探针才发现守卫不见了。
+
+**这类失效是静默的**：代码还在、行为不变，只是**少了检测**。最难查。
+
+**✅ 对策（cron 收尾固定动作）**：
+
+```bash
+cd ~/.hermes/skills/productivity/inexbot-open-knowledge-base   # 或 inexbot-knowledge-base
+git status --short          # ← 报告写「遗留：无」之前必须看这个
+git log --oneline -3         # 确认 remote 是否已跟上
+```
+
+| `git status` 输出 | 含义 | 动作 |
+|---|---|---|
+| 只有 ` M references/.index-snapshot.json` | **良性** —— `check_crawl_state.py` 每轮刷新它，而它被 git 跟踪 | 连同当轮文档一起 commit 即可 |
+| 有 ` M` / `??` 的**代码或文档** | ⚠️ **真未提交工作** | 必须 `add` + `commit` + `push` |
+| 有 ` M` 的**姊妹 KB 仓库**文件 | 那是**它自己** cron 的职责 | **不要替它提交**，只在报告里点名 |
+
+> 💡 **通则**：**上一轮报告里的 commit hash 不等于工作树此刻干净** ——
+> 它只证明「那个 commit 在库里」。**每轮都要独立跑一次 `git status`。**
+> （这正是本 skill §0.5 写的检查，与姊妹 KB 的陷阱 14 是同一件事的两面。）
+
+---
+
 ## 附：两个 KB 的基线速查（2026-11-01）
 
 | KB | 站点 | docs | index.json 字节 | locale 拆分 |

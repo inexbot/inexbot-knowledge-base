@@ -1,8 +1,8 @@
 ---
 name: inexbot-knowledge-base
 description: "纳博特科技知识库 RAG：每天定时爬取 doc.inexbot.com，由 hermes-skill-proxy 在请求时进行内存检索并注入 system prompt。"
-version: 2.12.0
-last_verified: 2026-11-01
+version: 2.14.0
+last_verified: 2026-11-02
 author: Hermes Agent
 license: MIT
 metadata:
@@ -222,6 +222,26 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 > 只是这一页本身就很短（FAQ 页）→ 正常。2026-10-29 实测 5 条 note 全部是后者。
 > 详见 `references/kb-cron-verification-workflow.md` §4。
 
+> ⚠️ **「index 里 800」≠「proxy 静默降级」（2026-11-02 实测澄清）**：
+> 两个「800」含义不同，混淆会得出**相反**结论 ——
+> - `crawler.py:448` 把 index 的 `content_snippet` **按设计**截到 800
+>   （`content[:800]`）→ index 侧 `== 800` 是**正常摘要窗口**，**不是 BUG**
+>   （本轮 196 条如此）；
+> - **静默降级只在 proxy 检索结果上判定** —— proxy 会去读 md 全文，
+>   命中正文时长度是 1378–4000 字符；**只有 proxy 返回恰好 800**
+>   才说明它没找到 md、回落到了 index 摘要。
+>
+> 本轮实测：index 侧 196 条 `== 800`，但 proxy 侧 25 条检索结果**无一条 == 800** ✅
+> 只看 index 的 snippet 长度就报「196 条静默降级」是**误判**。
+
+> ⚠️ **proxy 内存索引有两个结构，比 token 必须用 `_doc_scores`**：
+> - `_index_data['inexbot']` → **原始 item dict**（`title` / `description` 是**字符串**）
+> - `_doc_scores['inexbot']` → **分词后的 token 集合**（`title_tokens` / `desc_tokens` / `content_tokens`）
+>
+> 拿 `_index_data` 比 token → 字段类型不对 → **558 条全不一致的假阳性**。
+> 再叠加「必须用同一套 jieba 规则（`len(w) >= 2`）」，两条都踩 → 结论完全错误。
+> 正确做法见 `references/kb-cron-verification-workflow.md` §「proxy 内存索引有两个结构」。
+
 完整方法论（含「两个 KB 的 cron 并发改同一个 proxy 文件」的互相覆盖风险、
 「工作树里可能有长期未提交的重要改动」的检查清单、报告该怎么写）见
 `references/kb-cron-verification-workflow.md`。
@@ -230,8 +250,9 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 
 | 文件 | 覆盖内容 |
 |---|---|
-| **`references/shared-proxy-service-pitfalls.md`** | ⭐ **两个 KB 共用的 proxy 服务运维坑（跨 KB 权威来源）**：并发 restart 打断探针、restart 后健康检查必须重试、HTTP 状态码判读表、并发 commit 良性竞态、commit message 必须纯 ASCII（tirith `confusable_text`）、policy 拦截总清单、**§陷阱 9：终端输出里 `hermes...arch` 是脱敏不是截断**、**§陷阱 10：proxy 上游 120s timeout → 查手册类问题随机 502（已修）**、**§陷阱 11：漏拼 `.md` 后缀 → 0/558 假阳性**、**§陷阱 12：journal 500/502 计数必须按进程启动时间切片**、基线速查 |
-| **`references/crawl-state-2026-11-01.md`** | ⭐ **本 KB 最新基线快照**（2026-11-01）：558 篇 / index 1,722,769 bytes / IDENTICAL / slug 契约 558/558 / token 级 0 不一致 / 短 snippet 静默降级 0 / **端到端 12/12 全 200（最慢 144.7s → 证明 300s timeout 补丁仍承重）** / 上一轮成果跨 session 泄漏未提交的实证 |
+| **`references/shared-proxy-service-pitfalls.md`** | ⭐ **两个 KB 共用的 proxy 服务运维坑（跨 KB 权威来源）**：并发 restart 打断探针、restart 后健康检查必须重试、HTTP 状态码判读表、并发 commit 良性竞态、commit message 必须纯 ASCII（tirith `confusable_text`）、policy 拦截总清单、**§陷阱 9：终端输出里 `hermes...arch` 是脱敏不是截断**、**§陷阱 10：proxy 上游 120s timeout → 查手册类问题随机 502（已修）**、**§陷阱 11：漏拼 `.md` 后缀 → 0/558 假阳性**、**§陷阱 12：journal 500/502 计数必须按进程启动时间切片**、**§陷阱 13：姊妹 KB 的 agent 会直接改你 skill 自己的 SKILL.md**、**§陷阱 14：报告写「遗留：无」但工作其实没提交**、基线速查 |
+| **`references/crawl-state-2026-11-02.md`** | ⭐ **本 KB 最新基线快照**（2026-11-02）：558 篇 / index 1,722,769 bytes / IDENTICAL / slug 契约 558/558 / **孤儿 md 精确计数 0** / token 级 0 不一致 / 短 snippet 静默降级 0 / **端到端 12/12 全 200（最慢 183.9s → 证明 300s timeout 补丁仍承重）** / **index 里的 800 截断 vs proxy 降级的判别** / 上一轮成果跨 session 泄漏未提交的复现 |
+| **`references/crawl-state-2026-11-01.md`** | 11-01 基线快照：558 篇 / index 1,722,769 bytes / IDENTICAL / slug 契约 558/558 / token 级 0 不一致 / 短 snippet 静默降级 0 / **端到端 12/12 全 200（最慢 144.7s → 证明 300s timeout 补丁仍承重）** / 上一轮成果跨 session 泄漏未提交的实证 |
 | **`references/crawl-state-2026-10-31.md`** | 10-31 基线快照：558 篇 / index 1,722,769 bytes / IDENTICAL / token 级 0 不一致 / **端到端实测揪出 120s timeout 缺陷并修复** / 脱敏误判的实证与更正 |
 | `references/proxy-runtime-freshness.md` | proxy 内存索引新鲜度（含**正确的 token 级比对方法**）、重启判据、stdout 块缓冲陷阱、重载链断链、进程内检索链路测试 |
 | `references/upstream-url-migration.md` | 上游改 URL 路径的完整诊断流程（sitemap 查新路径 → 404/200 确认 → diff 判搬家 → refresh_drift 清孤儿 → 重启 proxy） |
@@ -664,6 +685,36 @@ print("repaired")
 
 > ⚠️ 与本 skill 已有的「两个 KB 的 cron 会并发改同一个 proxy 文件」是同一类竞态，
 > 但那次是**文件内容**层面的覆盖风险，这次是**提交层面**的良性竞争。
+
+### ⚠️ 姊妹 KB 的 agent 会直接改**你 skill 自己的 SKILL.md**（2026-11-01 现场）
+
+**这是「两个 KB 的 cron 并发改同一个 proxy 文件」的升级版** —— 被并发改的
+不只是 proxy repo，**本 skill 的 `SKILL.md` 本身**也会被姊妹 KB 的 agent 写。
+
+**现象**：给 `SKILL.md` 打 version 补丁时，工具返回：
+
+```
+_warning: .../inexbot-knowledge-base/SKILL.md was modified by sibling subagent
+          'b3c9f7dc-...' but this agent never read it.
+```
+
+`git diff` 显示对方改动**已在工作树里**（本轮是新增「长手册别把文件名当版本归属」
+一节 + 改了 JSON 协议工艺章行数），而这些**我此前从未读过**。
+
+**✅ 对策（4 步）**：
+
+1. **看到 `_warning: ... modified by sibling subagent` 就停一下** —— 别当错误提示忽略
+2. `git diff --stat` + `git diff <file> | grep '^+'` **看清对方加了什么**
+3. 不冲突 → **在对方改动之上增量 patch**（本轮把 version 2.11.0→2.12.0
+   和 references 表格行叠在对方新内容旁，零冲突）；
+   冲突 → **不要覆盖**，报告里点名，交给姊妹 KB 的 cron 收尾
+4. `git diff` 复核对方改动**仍在** → 再 `git add` + `commit`
+
+> 💡 **通则**：两个 KB 的 cron 都定在 11:00，**它们会写进彼此的 skill 目录**。
+> 看到这个 warning 时，把它当成「**先读对方改动，再决定怎么写**」的信号。
+> 尤其**不要**用 `edit`（全文重写）——那会把对方刚写的内容整段抹掉。
+>
+> 📌 完整版见 `references/shared-proxy-service-pitfalls.md` §陷阱 13。
 
 ### ⚠️ 无人值守 cron 下删文件会被审批卡住（2026-10-29 现场）
 

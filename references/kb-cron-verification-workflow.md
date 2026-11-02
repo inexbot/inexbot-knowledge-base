@@ -274,6 +274,61 @@ curl -s -m 360 -o /dev/null -w '%{http_code} %{time_total}s\n' \
 > ⚠️ **单次成功不算通过** —— timeout 类故障是**随机**的（实测 4 次挂 2 次）。
 > **同一个问题连打 4 次，全部 200 才算通过。**
 
+#### ⚠️ 两个 KB 的 e2e 探针会**并发打同一个 gateway** → 各自变慢（2026-11-01 实测）
+
+两个 KB 的 cron 都定在 11:00，**两边都会跑 `check_e2e_request.py`**，
+它们请求的是**同一个 gateway（8642）**，等于并发压同一个 LLM 后端。
+
+**现象**（2026-11-01 实测）：我那轮 12 次请求（3 查询 × 4 次）跑了 **约 14 分钟**；
+期间姊妹 KB 的探针也在跑（11:06 起 `--runs 3`，11:18 又起 `--runs 2`）。
+单次请求耗时因此明显拉长（46–145s）。
+
+**判读**：
+- **慢 ≠ 故障** —— 先看 `journalctl` 里 POST 的**状态码**，别看耗时
+- 2026-11-01 实测：两轮共 21 次请求**全部 HTTP 200**，耗时虽长但零失败
+- 只要**状态码全 200**就算过；耗时高只是并发排队，不是 timeout 问题
+
+**对策**：
+```bash
+# 想看真实耗时而不是排队时间 → 挑姊妹 KB 空闲的时段跑
+ps aux | grep -E "check_e2e_request" | grep -v grep
+```
+> ⚠️ **别因此就放宽 timeout 或降低重复次数** —— 判据是**状态码**，
+> 不是耗时。耗时只用来发现「gateway 真的慢到超过 proxy timeout」（那才是 502 的成因）。
+
+#### ⚠️ **index 里的 800 截断 ≠ proxy 的静默降级**（2026-11-02 实测澄清）
+
+两个「800」含义完全不同，混淆会得出相反结论：
+
+| 位置 | 800 的含义 | 判据 |
+|---|---|---|
+| `index.json` 的 `content_snippet` | **crawler 的设计**（`crawler.py:448` → `content[:800]`） | index 里**恰好 800 是正常的**（本轮 196 条），**不是 BUG** |
+| **proxy 检索结果** 的 `content_snippet` | proxy 读 md 全文后的长度（1378–4000） | **只有 proxy 返回恰好 800** 才说明它没找到 md、回落到了 index 摘要 → **静默降级（BUG）** |
+
+> 📌 2026-11-02 实测：index 侧 196 条 `== 800`（正常摘要窗口），
+> 但 proxy 侧 25 条检索结果**没有一条 == 800** → **无静默降级** ✅
+>
+> 💡 只看 index 的 snippet 长度就报「196 条静默降级」是**误判**。
+> 静默降级只能在 **proxy 检索链路**上测（进程内 `search_single_kb()`）。
+
+#### ⚠️ **proxy 内存索引有两个结构** —— 比 token 必须用 `_doc_scores`（2026-11-02 实测）
+
+| 结构 | 内容 | 用途 |
+|---|---|---|
+| `_index_data['inexbot']` | **原始 item dict**（`title` / `description` 是**字符串**） | 看原文 |
+| `_doc_scores['inexbot']` | **分词后的 token 集合**（`title_tokens` / `desc_tokens` / `content_tokens`） | **比 token 用这个** |
+
+> ⚠️ 拿 `_index_data` 去比 token → 字段类型不对 → **558 条全不一致的假阳性**。
+> 加上「必须用同一套 jieba 规则（`len(w) >= 2`）」，两条都踩会得到完全错误的结论。
+>
+> 正确判据（本轮实测 **0 不一致**）：
+> ```python
+> mem = mod._doc_scores["inexbot"][k]
+> disk_tok = set(w for w in jieba.cut(disk[k]["title"]) if len(w) >= 2)
+> assert disk_tok == set(mem["title_tokens"])
+> ```
+> （`desc_tokens` / `content_tokens` 同理，三组都比才完整。）
+
 ### 6. 回归 + 部署
 
 改动 proxy 代码后：`sudo systemctl restart hermes-skill-proxy`，
@@ -391,6 +446,26 @@ _warning: hermes-skill-proxy.py was modified by sibling subagent
    （本次正是靠 `git diff --stat` 发现 sibling 的 `_md_slug_candidates()` 修复没被覆盖）
 3. commit 前再 grep 一次关键函数名，两个 KB 的修复都要在
 4. 姊妹 KB 的 SKILL.md 里有同样的警告，**两边都要遵守**
+
+#### ⚠️ 并发改的可能是**你 skill 自己的 SKILL.md**（2026-11-01 新增）
+
+上面的规则针对的是 **proxy repo**。2026-11-01 实测发现：**姊妹 KB 的 agent
+会直接写进本 skill 的 `SKILL.md`** —— 我打 version 补丁时收到：
+
+```
+_warning: .../inexbot-knowledge-base/SKILL.md was modified by sibling subagent
+          'b3c9f7dc-...' but this agent never read it.
+```
+
+对方加的是「长手册别把文件名当版本归属」一节（改 JSON 协议工艺章行数 2183→2097），
+**我此前从未读过**。
+
+**✅ 处置**：先 `git diff` 看清对方加了什么 → 不冲突就**在对方改动之上增量 patch**
+→ 冲突就**不要覆盖**，报告里点名。**尤其别用 `edit` 全文重写。**
+
+> ⚠️ **本 skill 的 cron 每轮都可能撞上这个**（两个 KB 都定在 11:00，
+> 且它们会写进彼此的 skill 目录）。把它当常态，而不是意外。
+> 详见 `references/shared-proxy-service-pitfalls.md` §陷阱 13。
 
 ### ⚠️ `patch` 改含疑似密钥的行 → 会把代码**改坏**（2026-10-31 现场）
 
