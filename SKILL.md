@@ -1,8 +1,8 @@
 ---
 name: inexbot-knowledge-base
 description: "纳博特科技知识库 RAG：每天定时爬取 doc.inexbot.com，由 hermes-skill-proxy 在请求时进行内存检索并注入 system prompt。"
-version: 2.16.0
-last_verified: 2026-11-03
+version: 2.17.0
+last_verified: 2026-11-04
 author: Hermes Agent
 license: MIT
 metadata:
@@ -143,8 +143,19 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
     > 「proxy 放弃太早」还是「gateway 真的挂住」。完整判读表见
     > `references/shared-proxy-service-pitfalls.md` §陷阱 17。
     >
+    > ⚠️ **2026-11-04 更正/补充**：`gateway_timeout=1800` 是** inactivity（无活动）看门狗**，
+    > **不是墙钟上限**；provider 的 900s 会被 `api_max_retries`（默认 3）**乘成 2700s+**；
+    > api_server 路径**没有 HTTP 层超时** → **真正先放弃的永远是 proxy**。
+    > **各层超时与「proxy 该设多少」的推导见 `references/proxy-timeout-layer-anatomy.md`。**
+    >
+    > ⚠️ **别用「这轮全绿」判定已修复**（2026-11-04 实测：同样并发 34 次请求下
+    > 11-04 一次 502 都没出现，而 11-03 出了 4 次 —— 随机性明显）。
+    > **唯一可靠判据是归因法**（elapsed 是否精确等于 proxy timeout + gateway 侧
+    > start-time 戳最终有没有出现）。
+    >
     > ⚠️ **姊妹 KB 的探针日志**在 `/tmp/e2e-<YYYY-MM-DD>.log`（姊妹 cron 写的）——
     > **两侧同时出现同样的 502 = 共享链路问题，不是某个 KB 的内容问题**。
+    > ⚠️ **排障时尽量错开两个 KB 的探针时段** —— 并发压 gateway 会加剧上游停顿。
 6. 修复 → 部署 → 回归
 
 > ⚠️ **第 0 步为什么不能省**：2026-10-28 发现 10-27 那轮的 4 条待办
@@ -263,6 +274,8 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 |---|---|
 | **`references/shared-proxy-service-pitfalls.md`** | ⭐ **两个 KB 共用的 proxy 服务运维坑（跨 KB 权威来源）**：并发 restart 打断探针、restart 后健康检查必须重试、HTTP 状态码判读表、并发 commit 良性竞态、commit message 必须纯 ASCII（tirith `confusable_text`）、policy 拦截总清单、**§陷阱 9：终端输出里 `hermes...arch` 是脱敏不是截断**、**§陷阱 10：proxy 上游 120s timeout → 查手册类问题随机 502（已修）**、**§陷阱 11：漏拼 `.md` 后缀 → 0/558 假阳性**、**§陷阱 12：journal 500/502 计数必须按进程启动时间切片**、**§陷阱 13：姊妹 KB 的 agent 会直接改你 skill 自己的 SKILL.md**、**§陷阱 14：报告写「遗留：无」但工作其实没提交**、**§陷阱 15：`--amend` 后 push → non-fast-forward（不是网络问题！修法是 reset --hard 而非 rebase）**、**§陷阱 16：普通箭头 `→` 也会被 `tirith:variation_selector` 拦**、**§陷阱 17：proxy 300s timeout < gateway 900s → 偶发 502（含 arrival↔response 归因法）**、**§陷阱 18：token 比对字段名写错 → 全量假阳性**、**§陷阱 19：`process(wait)` clamp 60s → 长任务用 background+notify**、基线速查 |
 | **`references/crawl-state-2026-11-03.md`** | ⭐ **本 KB 最新基线快照**（2026-11-03）：558 篇 / index 1,722,769 bytes / IDENTICAL / slug 契约 558/558 / **孤儿 md 精确计数 0** / token 级 0 不一致 / **端到端 11/12 —— 1 次 502 @ 300.1s（proxy 300s < gateway 900s）** / 决定性证据（gateway 侧 1270s 才完成）/ 正常延迟区间 33–164s / 上一轮成果**又一次**跨 session 泄漏未提交 |
+| **`references/crawl-state-2026-11-04.md`** | ⭐ **本 KB 最新基线快照**（2026-11-04）：558 篇 / index 1,722,769 bytes / IDENTICAL / slug 契约 558/558 / 孤儿 md 0 / token 级 0 不一致 / **端到端 12/12 全 200（最慢 151.7s；含姊妹并发共 34 次请求 0 次 502）** / **超时分层更正（inactivity ≠ 墙钟）** / 注入体积 11.3k–21.0k 字符 / **502 修复只做了一半（unit 已改、服务未重启）** |
+| **`references/proxy-timeout-layer-anatomy.md`** | ⭐ **proxy → gateway → LLM 全链路超时解剖**（2026-11-04 新增）：各层 timeout 一览 + **`gateway_timeout` 是 inactivity 不是墙钟** + 重试把 900s 乘成 2700s + api_server 无 HTTP 层超时 / **注入体积实测 11k–21k 字符**（LLM 延迟根因）/ **nginx :80 不是 proxy 消费者**（别误判）/ **改 unit 的安全做法**（锚点插入 + sha256 校验密钥）/ 「一轮全绿 ≠ 已修复」的判读 |
 | **`references/crawl-state-2026-11-02.md`** | ⭐ **本 KB 最新基线快照**（2026-11-02）：558 篇 / index 1,722,769 bytes / IDENTICAL / slug 契约 558/558 / **孤儿 md 精确计数 0** / token 级 0 不一致 / 短 snippet 静默降级 0 / **端到端 12/12 全 200（最慢 183.9s → 证明 300s timeout 补丁仍承重）** / **index 里的 800 截断 vs proxy 降级的判别** / 上一轮成果跨 session 泄漏未提交的复现 |
 | **`references/crawl-state-2026-11-01.md`** | 11-01 基线快照：558 篇 / index 1,722,769 bytes / IDENTICAL / slug 契约 558/558 / token 级 0 不一致 / 短 snippet 静默降级 0 / **端到端 12/12 全 200（最慢 144.7s → 证明 300s timeout 补丁仍承重）** / 上一轮成果跨 session 泄漏未提交的实证 |
 | **`references/crawl-state-2026-10-31.md`** | 10-31 基线快照：558 篇 / index 1,722,769 bytes / IDENTICAL / token 级 0 不一致 / **端到端实测揪出 120s timeout 缺陷并修复** / 脱敏误判的实证与更正 |
@@ -663,11 +676,20 @@ body `Read timed out. (read timeout=300)`；**姊妹 KB 的独立探针同时命
 
 **根因：proxy 比 gateway 先放弃。**
 
-| 层 | timeout | 位置 |
-|---|---|---|
-| proxy → gateway | **300s** | `hermes-skill-proxy.py` 的 `HERMES_TIMEOUT` |
-| gateway → LLM provider | **900s** | `agent/anthropic_adapter.py` 的 `_read_timeout` |
-| gateway 整轮 | **1800s** | `config.yaml` 的 `agent.gateway_timeout` |
+| 层 | timeout | 位置 | 性质 |
+|---|---|---|---|
+| proxy → gateway | **300s** | `hermes-skill-proxy.py` 的 `HERMES_TIMEOUT` | **墙钟** |
+| gateway → LLM provider（单次） | **900s** | `agent/anthropic_adapter.py` 的 `_read_timeout` | 单次 HTTP 读超时 |
+| gateway → provider（**×重试 3 次**） | 最坏 **2700s+** | `run_agent.py` 的 `api_max_retries` | 每次重试各算一份 900s |
+| gateway 整轮 | **1800s** | `config.yaml` 的 `agent.gateway_timeout` | ⚠️ **「无活动」看门狗，不是墙钟** |
+| gateway HTTP 层 | **无** | `gateway/platforms/api_server.py` 的 `_handle_chat_completions` | 无 `wait_for` 封顶 |
+
+> ⚠️ **2026-11-04 更正**：`gateway_timeout=1800` 是** inactivity（无活动）看门狗**，
+> 不是墙钟上限 —— 合法长请求跑 3000s+ 完全正常（gateway 源码注释明说
+> "the agent can run for hours if it's actively calling tools / receiving stream tokens"）。
+> 且 **api_server 路径没有 HTTP 层超时** → **真正先放弃的永远是 proxy**。
+> ⇒ 「proxy 设 1800s 就对齐了」这个推理**是错的**：上游最坏是 900×3=2700s。
+> 完整分层解剖 + 注入体积实测见 `references/proxy-timeout-layer-anatomy.md`。
 
 **决定性证据**：请求 11:08:13 到达 → proxy 11:13:13 返回 502（**恰好 300.0s**）；
 **同一个请求在 gateway 侧 11:29:23 才完成（1270s，HTTP 200）**，晚了 970s。
@@ -692,6 +714,81 @@ body `Read timed out. (read timeout=300)`；**姊妹 KB 的独立探针同时命
 > （provider 900s / gateway 1800s），否则长请求必然被 proxy 截胡。
 
 > 📌 完整版见 `references/shared-proxy-service-pitfalls.md` §陷阱 17。
+
+### ⚠️ 改 systemd unit 的 `Environment=` → 必须用「锚点插入 + 密钥 sha256 校验」（2026-11-04 实测）
+
+**不要用 `patch` 手打整块 unit** —— 会撞上「含密钥的行被脱敏污染」的坑
+（见下面「patch 工具写含密钥的行」那条）。
+
+**安全做法**：读文件 → 在**稳定锚点行后**插入 → **sha256 校验密钥未被改动** → 才安装。
+
+```python
+ANCHOR = 'Environment="SKILL_NAME=inexbot-knowledge-base"'   # ← 稳定、绝不含密钥
+NEW    = 'Environment="HERMES_TIMEOUT=1800"'
+# ... 读 → replace(ANCHOR, ANCHOR + "\n" + NEW, 1) → 校验 key digest 未变 → sudo cp
+```
+
+2026-11-04 实测：部署版与 repo 模板的 key digest 均为 `(21, '23760f4462da')`，
+改前改后一致，**未**被脱敏污染（`hermes...rch` 只是显示层脱敏）。
+
+**改了 unit 之后的完整链路**（缺一则「写了 ≠ 上线」）：
+`daemon-reload` → `restart` → **带重试**的健康检查 → 验证 `/proc/<pid>/environ` 里
+新变量到位 → **commit + push proxy repo**（模板也改了，不提交下次 pull 会退回）。
+
+> ⚠️ **restart 前必须确认姊妹 KB 无并发作业** —— 两个 cron 同在 11:00，
+> 姊妹 KB 的 e2e 探针可能正在跑，restart 会把它打成 `RemoteDisconnected`。
+
+> 📌 完整可复制代码见 `references/proxy-timeout-layer-anatomy.md` §四。
+
+### ⚠️ `ss -ltn` 看到 :80 有 nginx ≠ nginx 在调 proxy（2026-11-04 实测）
+
+排查「还有谁在调 proxy / 重启 proxy 会不会影响谁」时，会看到 nginx 监听 :80，
+容易误判成 proxy 的消费者。**实测是 Debian 默认站点**
+（`/etc/nginx/sites-enabled/default` → `root /var/www/html`），
+**没有 `proxy_pass`**、`/etc/nginx/conf.d/` 是空的。
+
+判别命令（无输出 = nginx 不参与这条链路）：
+
+```bash
+sudo -n grep -rn "8643\|proxy_pass\|proxy_read_timeout" /etc/nginx/sites-enabled/ /etc/nginx/conf.d/
+```
+
+> ⚠️ 反之，若将来 nginx 真的加了 `proxy_pass http://localhost:8643`，
+> 那 **`proxy_read_timeout` 会成为真正的端到端上限** —— 必须一起调大，
+> 否则 nginx 会先于 proxy 断开。
+
+### ⚠️ 「这轮 e2e 全绿」≠「502 已修复」（2026-11-04 实测）
+
+11-03 出现 4 次 502；**11-04 同样在两个 KB 探针并发（proxy 侧当日共 34 次请求）
+的情况下 0 次 502**，端到端 12/12 全 200，最慢 151.7s。
+
+**结论不是「已修复」**，而是 11-03 的 502 由**上游 LLM 偶发停顿**触发，
+**随机性明显**。⇒ 既**不能**用「某轮全绿」判定已修复，
+也**不能**用「某轮有 502」判定必然故障。**唯一可靠判据仍是归因法**：
+elapsed 精确等于 proxy timeout → timeout 类；再查 gateway 侧同一 start-time 戳
+最终有没有出现（有=proxy 放弃太早 / 无=gateway 挂住）。
+
+> 💡 **排障时尽量错开两个 KB 的探针时段** —— 并发压 gateway 会加剧上游停顿。
+
+### ⚠️ 量「注入体积」= 量化 LLM 延迟根因（2026-11-04 实测）
+
+proxy 每次请求都把 top-5 检索结果全量拼进 system prompt。
+**进程内测量**（不联网、不调 LLM）—— 复用上面「测 proxy 检索链路」的
+`search_single_kb()` 加载方式，把各条 `content_snippet` 长度加起来：
+
+```python
+res = mod.search_single_kb("inexbot", "冲压工艺 手册 参数设置", 5)
+chars = sum(len(r.get("content_snippet") or "") for r in res)
+```
+
+**2026-11-04 实测（单库 top-5）**：注入体积区间 **11.3k–21.0k 字符**
+（长手册类查询 5 条全部打满 4000 字上限）。
+这是「prompt 越长越容易超 300s」的量化依据。
+
+> ⚠️ **不要擅自调小 snippet 上限** —— 4000 是为了让长手册正文完整可读
+> （见「长手册型主题」一节）。调小会牺牲答案质量 → **属产品决策，需人工确认**。
+
+> 📌 全部 5 条查询的实测数据见 `references/proxy-timeout-layer-anatomy.md` §二。
 
 ### ⚠️ token 级比对时**字段名写错** → 全量假阳性（2026-11-03 实测）
 
