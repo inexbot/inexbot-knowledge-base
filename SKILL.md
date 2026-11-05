@@ -1,8 +1,8 @@
 ---
 name: inexbot-knowledge-base
 description: "纳博特科技知识库 RAG：每天定时爬取 doc.inexbot.com，由 hermes-skill-proxy 在请求时进行内存检索并注入 system prompt。"
-version: 2.17.0
-last_verified: 2026-11-04
+version: 2.18.0
+last_verified: 2026-11-05
 author: Hermes Agent
 license: MIT
 metadata:
@@ -156,6 +156,13 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
     > ⚠️ **姊妹 KB 的探针日志**在 `/tmp/e2e-<YYYY-MM-DD>.log`（姊妹 cron 写的）——
     > **两侧同时出现同样的 502 = 共享链路问题，不是某个 KB 的内容问题**。
     > ⚠️ **排障时尽量错开两个 KB 的探针时段** —— 并发压 gateway 会加剧上游停顿。
+    >
+    > ⭐ **2026-11-05 起：proxy 的 `HERMES_TIMEOUT` 已是 1800s**
+    > （unit `Environment="HERMES_TIMEOUT=1800"` + 运行进程 environ 双重确认生效）。
+    > ⇒ **归因法的判据要跟着 timeout 变**：以后看到 502，先看 elapsed 是否等于
+    > **当前**的 `HERMES_TIMEOUT`（现 1800s），**别再默认是 300s**。
+    > ⇒ 300s 时代的「proxy 放弃太早」这一根因**已从配置层消除**；
+    > 若仍出 502，优先怀疑 provider 侧限流/挂住（gateway 侧没有 start-time 戳）。
 6. 修复 → 部署 → 回归
 
 > ⚠️ **第 0 步为什么不能省**：2026-10-28 发现 10-27 那轮的 4 条待办
@@ -275,6 +282,7 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 | **`references/shared-proxy-service-pitfalls.md`** | ⭐ **两个 KB 共用的 proxy 服务运维坑（跨 KB 权威来源）**：并发 restart 打断探针、restart 后健康检查必须重试、HTTP 状态码判读表、并发 commit 良性竞态、commit message 必须纯 ASCII（tirith `confusable_text`）、policy 拦截总清单、**§陷阱 9：终端输出里 `hermes...arch` 是脱敏不是截断**、**§陷阱 10：proxy 上游 120s timeout → 查手册类问题随机 502（已修）**、**§陷阱 11：漏拼 `.md` 后缀 → 0/558 假阳性**、**§陷阱 12：journal 500/502 计数必须按进程启动时间切片**、**§陷阱 13：姊妹 KB 的 agent 会直接改你 skill 自己的 SKILL.md**、**§陷阱 14：报告写「遗留：无」但工作其实没提交**、**§陷阱 15：`--amend` 后 push → non-fast-forward（不是网络问题！修法是 reset --hard 而非 rebase）**、**§陷阱 16：普通箭头 `→` 也会被 `tirith:variation_selector` 拦**、**§陷阱 17：proxy 300s timeout < gateway 900s → 偶发 502（含 arrival↔response 归因法）**、**§陷阱 18：token 比对字段名写错 → 全量假阳性**、**§陷阱 19：`process(wait)` clamp 60s → 长任务用 background+notify**、基线速查 |
 | **`references/crawl-state-2026-11-03.md`** | ⭐ **本 KB 最新基线快照**（2026-11-03）：558 篇 / index 1,722,769 bytes / IDENTICAL / slug 契约 558/558 / **孤儿 md 精确计数 0** / token 级 0 不一致 / **端到端 11/12 —— 1 次 502 @ 300.1s（proxy 300s < gateway 900s）** / 决定性证据（gateway 侧 1270s 才完成）/ 正常延迟区间 33–164s / 上一轮成果**又一次**跨 session 泄漏未提交 |
 | **`references/crawl-state-2026-11-04.md`** | ⭐ **本 KB 最新基线快照**（2026-11-04）：558 篇 / index 1,722,769 bytes / IDENTICAL / slug 契约 558/558 / 孤儿 md 0 / token 级 0 不一致 / **端到端 12/12 全 200（最慢 151.7s；含姊妹并发共 34 次请求 0 次 502）** / **超时分层更正（inactivity ≠ 墙钟）** / 注入体积 11.3k–21.0k 字符 / **502 修复只做了一半（unit 已改、服务未重启）** |
+| **`references/crawl-state-2026-11-05.md`** | ⭐ **本 KB 最新基线快照**（2026-11-05）：558 篇 / index 1,722,769 bytes / IDENTICAL / slug 契约 558/558 / 孤儿 md 0 / token 级 0 不一致 / **⭐ 502 修复「真正上线」—— 运行进程 environ 里 `HERMES_TIMEOUT=1800` 已生效（由姊妹 KB 的 cron 顺带 restart 部署）** / 引用链接 39/39 全 200 / **陷阱 11 三连假阳性指纹**（slug 契约 0/558 + 孤儿=全量 + 检索正常 ⇒ 必是脚本自己写错） |
 | **`references/proxy-timeout-layer-anatomy.md`** | ⭐ **proxy → gateway → LLM 全链路超时解剖**（2026-11-04 新增）：各层 timeout 一览 + **`gateway_timeout` 是 inactivity 不是墙钟** + 重试把 900s 乘成 2700s + api_server 无 HTTP 层超时 / **注入体积实测 11k–21k 字符**（LLM 延迟根因）/ **nginx :80 不是 proxy 消费者**（别误判）/ **改 unit 的安全做法**（锚点插入 + sha256 校验密钥）/ 「一轮全绿 ≠ 已修复」的判读 |
 | **`references/crawl-state-2026-11-02.md`** | ⭐ **本 KB 最新基线快照**（2026-11-02）：558 篇 / index 1,722,769 bytes / IDENTICAL / slug 契约 558/558 / **孤儿 md 精确计数 0** / token 级 0 不一致 / 短 snippet 静默降级 0 / **端到端 12/12 全 200（最慢 183.9s → 证明 300s timeout 补丁仍承重）** / **index 里的 800 截断 vs proxy 降级的判别** / 上一轮成果跨 session 泄漏未提交的复现 |
 | **`references/crawl-state-2026-11-01.md`** | 11-01 基线快照：558 篇 / index 1,722,769 bytes / IDENTICAL / slug 契约 558/558 / token 级 0 不一致 / 短 snippet 静默降级 0 / **端到端 12/12 全 200（最慢 144.7s → 证明 300s timeout 补丁仍承重）** / 上一轮成果跨 session 泄漏未提交的实证 |
@@ -667,6 +675,15 @@ resp = requests.post(..., timeout=HERMES_TIMEOUT, stream=True)
 
 ### ⚠️ proxy 的 300s timeout 仍短于 gateway 的 900s → **偶发** 502（2026-11-03 实测）
 
+> ⭐ **2026-11-05 已闭环（配置层）**：unit 加 `Environment="HERMES_TIMEOUT=1800"`，
+> 2026-11-05 11:02:57 重启后运行进程 environ 实测 `HERMES_TIMEOUT=1800` **已生效**。
+> ⇒ **本节描述的是 300s 时代的历史状态**。
+> ⚠️ **归因法的判据要跟着 timeout 变**：以后看到 502，先看 elapsed 是否等于
+> **当前**的 `HERMES_TIMEOUT`（现 **1800s**），**别再默认是 300s**。
+> 若仍出 502，优先怀疑 provider 侧限流/挂住（gateway 侧没有对应的 start-time 戳）。
+> ⚠️ 1800s 只是「兜底对齐」不是「保证不超时」—— provider 的 900s 会被
+> `api_max_retries`（默认 3）乘成 2700s+，且 `gateway_timeout=1800` 是 inactivity 看门狗。
+
 **这是下面那条「120s 太短」缺陷的续集 —— 把 120 改成 300 只是把必然故障变成了偶发故障。**
 
 **症状**：e2e 探针 **11/12**，1 次 HTTP 502，耗时**恰好 300.1s**，
@@ -931,6 +948,31 @@ Linux 255 字节上限 → `Path.exists()` 抛 `OSError: [Errno 36] File name to
 
 ✅ **复用 proxy 的 `_md_slug_candidates()`**，别自己复刻，并且 `except OSError: continue`。
 2026-10-29 实测复用后 558/558 全部解析成功。
+
+### ⚠️ 漏拼 `.md` 后缀 → 「slug 契约 0/558 + 孤儿=全量」的**假阳性**（已复发 4 次）
+
+**症状**：自写审计脚本报 slug 契约 `0/558`、孤儿 md 数**恰好 = 558** ——
+看起来跟「proxy 与 crawler 的 slug 契约断裂」一模一样，**但线上完全正常**。
+
+**根因**：`_md_slug_candidates()` 返回的是**不带 `.md` 后缀的裸 slug**，
+proxy 内部是 `md_dir / f"{slug}.md"` —— **后缀由调用方拼**。
+
+**三连假阳性指纹**（三者同时成立 ⇒ 几乎必然是脚本自己写错）：
+
+| 指纹 | 含义 |
+|---|---|
+| slug 契约 **0/558**（整齐等于条目数） | 候选名一个都没命中 |
+| 孤儿 md 数 **恰好 = 条目数** | 所有 md 都被判成不可达 |
+| **检索链路实测正常**（无 800 静默降级、无 HTTP 500） | proxy 侧其实健康 |
+
+⚠️ **已在 2026-10-29 / 10-31 / 11-01 / 11-05 复发 4 次**，每次都是新写审计脚本时踩。
+**写完检查脚本先跑这一条自检**：
+```python
+cands = mod._md_slug_candidates(some_key)
+print(repr(cands[:2]))                          # 看清楚带不带 ".md"
+print((md_root / (cands[0] + ".md")).exists())   # 按 proxy 的真实用法拼
+```
+完整版见 `references/shared-proxy-service-pitfalls.md` §陷阱 11。
 
 ### ⚠️ 引用链接双重编码 → 所有 cite 链接 404（2026-10-25 已修）
 

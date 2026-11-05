@@ -305,6 +305,30 @@ for slug in mod._md_slug_candidates(k):
 > `Path.exists()` 会抛 `OSError [Errno 36]` → 必须 `except OSError: continue` 兜住，
 > 否则**检查脚本自己**先崩掉。
 
+### ⚠️ 陷阱 11 的三连假阳性指纹（2026-11-05 第 4 次复发时归纳）
+
+**这个坑已复发 4 次**（2026-10-29 / 10-31 / 11-01 / 11-05），每次都是**新写审计脚本时踩的**。
+⇒ 现有措辞不够醒目，**每次新写检查脚本都要先确认函数返回值的语义**。
+
+**三个指纹同时成立 ⇒ 几乎必然是脚本自己写错，不是 KB 坏了**：
+
+| 指纹 | 含义 |
+|---|---|
+| slug 契约 **0/558**（整齐等于条目数） | 候选名一个都没命中 |
+| 孤儿 md 数 **恰好 = 条目数**（558） | 所有 md 都被判成不可达 |
+| **检索链路实测正常**（无 800 静默降级、无 HTTP 500） | 代理侧其实完全健康 |
+
+**最快的自检**（写完检查脚本先跑这一条）：
+
+```python
+cands = mod._md_slug_candidates(some_index_key)
+print(repr(cands[:2]))          # 看清楚返回值到底带不带 ".md"
+print((md_root / (cands[0] + ".md")).exists())   # 按 proxy 的真实用法拼
+```
+
+**读源码确认**：proxy 的 `read_full_content()` 里是 `md_dir / f"{slug}.md"`
+—— **`.md` 由调用方拼，函数返回的是裸 slug**。
+
 ---
 
 ## 陷阱 12：journal 的 500/502 计数**必须按进程启动时间切片**（2026-11-01 实测）
@@ -543,6 +567,17 @@ PYEOF
 ---
 
 ## 陷阱 17：proxy 的 300s 上游 timeout **仍短于** gateway 的 900s provider timeout → 偶发 502（2026-11-03 实测）
+
+> ⭐ **2026-11-05 已闭环（配置层）**：unit 加 `Environment="HERMES_TIMEOUT=1800"`，
+> 2026-11-05 11:02:57 重启后运行进程 environ 实测 `HERMES_TIMEOUT=1800` **已生效**。
+> ⇒ **本陷阱描述的是 300s 时代的历史状态**。
+> ⚠️ **归因法的判据要跟着 timeout 变**：以后看到 502，先看 elapsed 是否等于
+> **当前**的 `HERMES_TIMEOUT`（现 **1800s**），**别再默认是 300s**。
+> ⇒ 若仍出 502，优先怀疑 provider 侧限流/挂住（gateway 侧没有对应的 start-time 戳）。
+> ⚠️ 另注：`gateway_timeout=1800` 是** inactivity 看门狗不是墙钟**，
+> 且 provider 的 900s 会被 `api_max_retries`（默认 3）**乘成 2700s+**
+> ⇒ 1800s 只是「兜底对齐」，不是「保证不超时」。详见
+> `references/proxy-timeout-layer-anatomy.md`。
 
 **这是陷阱 10 的「续集」—— 300s 那次修复把 502 从必然变成偶发，但没有根治。**
 2026-10-31 把 proxy 的上游 timeout 从 120s 提到 300s（commit `a331618`）后，
