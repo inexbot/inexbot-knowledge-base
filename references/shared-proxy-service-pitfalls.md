@@ -715,6 +715,73 @@ terminal(background=true, notify_on_complete=true, timeout=1800) ...
 
 ---
 
+## 陷阱 20：**待办的部署可能已被姊妹 KB 完成** → 盲目 restart 会打断对方的探针（2026-11-05 实测）
+
+**这是陷阱 1 的「解药」** —— 陷阱 1 说「两个 cron 会并发 restart」，
+本条说「**所以你可能根本不需要 restart**」。
+
+**场景（2026-11-05 现场）**：11-04 那轮遗留待办是
+「unit 已加 `Environment="HERMES_TIMEOUT=1800"`，但**服务没重启** → 线上仍跑 300s」。
+本轮开工查部署状态，发现：
+
+```
+ExecMainStartTimestamp=Thu 2026-11-05 11:02:58 CST
+/proc/<pid>/environ → HERMES_TIMEOUT=1800     ← 已经在跑了！
+```
+
+**是姊妹 KB 的 cron 在 11:02:58 restart 过 proxy，顺带把待办部署了。**
+
+**⚠️ 危害**：若不查就自己 restart，会打断姊妹 KB **当时正在跑的 e2e 探针**
+（本轮实测其探针 PID 1845302 正在跑 4×3=12 次请求，11:05 起）→
+探针被打成 `RemoteDisconnected` → **制造一个本来不存在的新故障**，
+还会让对方下轮误判「链路坏了」。
+
+**✅ 决策流程（任何部署类待办都照这个走）**：
+
+```bash
+# ① 进程什么时候起的？
+ps -o pid,lstart,etime -p $(pgrep -f hermes-skill-proxy.py | head -1)
+# ② 目标变量在不在 environ 里？
+sudo -n tr '\0' '\n' < /proc/$(pgrep -f hermes-skill-proxy.py | head -1)/environ \
+  | grep -E "^(HERMES_TIMEOUT|SKILL_NAME|PROXY_PORT)="
+# ③ unit 文件里有没有？
+sudo -n grep -n "Environment=" /etc/systemd/system/hermes-skill-proxy.service
+```
+
+| 进程启动时间 vs unit 改动时间 | environ 里有目标变量？ | 动作 |
+|---|---|---|
+| 早于 unit 改动 | ❌ | **要 restart**（+ 陷阱 2 的带重试健康检查） |
+| **晚于 unit 改动** | ✅ | ⭐ **已部署 —— 不要 restart** |
+| 晚于 unit 改动 | ❌ | ⚠️ unit 写错了 → 查 `Unknown key name`（陷阱 6） |
+| 早于 unit 改动 | ✅ | 只是恰好等于代码默认值 → 仍建议 restart 让 unit 生效 |
+
+> 💡 **本 KB 已有现成的自动化守卫**（别手搓这三行）：
+> ```bash
+> python3 ~/.hermes/skills/productivity/inexbot-open-knowledge-base/scripts/check_proxy_env.py --units
+> ```
+> exit 0 = 线上 5 个变量全部到位且等于代码默认值，且两份 unit 逐项一致；
+> exit 1 = 有缺失/不一致（脚本会打印「unit 没写」还是「没 restart」的判读指引）；
+> exit 2 = 找不到 proxy 进程。**hash-only 输出**，不泄露密钥明文。
+
+**💡 通则：cron 报告写「证据」，不写「我部署了」。**
+本轮的正确写法：
+> 「restart 是**姊妹 KB 的 cron** 做的（证据：`ExecMainStartTimestamp` = 11:02:58，
+> environ 里 `HERMES_TIMEOUT=1800` 在位）。**证据成立即算闭环**，
+> 不必重新 restart 打断对方探针。」
+
+**⚠️ 前置条件**：任何 restart 之前**必须**先查并发：
+```bash
+ps aux | grep -E "check_e2e_request|crawler.py|refresh_drift|regen_md" | grep -v grep
+```
+有输出 = 姊妹在跑 = **任何 restart 都是净伤害**。
+
+> 📌 相关的「补丁写了 ≠ 上线」判据见 `references/proxy-runtime-freshness.md` §陷阱 4；
+> 完整流程见 `references/kb-cron-verification-workflow.md` §6。
+> 📌 手工等价流程见姊妹 skill 的 `references/deployment-readiness-checklist.md`；
+> 完整的「补丁写了 ≠ 上线」判据见 `references/proxy-runtime-freshness.md` §陷阱 4。
+
+---
+
 ## 附：两个 KB 的基线速查（2026-11-01）
 
 | KB | 站点 | docs | index.json 字节 | locale 拆分 |

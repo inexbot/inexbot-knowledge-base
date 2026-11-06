@@ -335,6 +335,54 @@ ps aux | grep -E "check_e2e_request" | grep -v grep
 **分两条独立命令**（restart 和 curl 不要链在同一条 `&&` 里，见姊妹 skill 的
 「同一条命令里会假性失败」章节），再跑完整回归。
 
+#### ⚠️ **先确认「是不是已经被别人部署了」再决定要不要自己 restart**（2026-11-05 实测）
+
+**上一轮遗留的待办是「unit 已改 `HERMES_TIMEOUT=1800`，但服务没重启 → 线上仍跑 300s」。**
+本轮开工第一件事就是查部署状态 —— 结果发现：
+
+```
+ExecMainStartTimestamp=Thu 2026-11-05 11:02:58 CST     ← 进程是今天 11:02:58 起的
+HERMES_TIMEOUT=1800                                    ← 已经在 environ 里了！
+```
+
+**是姊妹 KB 的 cron 在 11:02:58 已经 restart 过 proxy，顺带把 11-04 的待办部署了。**
+（证据：`journalctl` 里 11-04 之前是旧 PID，11-05 11:02:58 出现新 PID + `Started`。）
+
+**⚠️ 如果不查就自己 restart，会白白打断姊妹 KB 正在跑的 e2e 探针**
+（11:05 时它的探针 PID 1845302 正在跑 4×3 次请求）→ 探针被打成 `RemoteDisconnected`，
+反而制造一个**新的**假故障。
+
+**✅ 决策流程（部署类待办的标准动作）**：
+
+```bash
+# ① 进程什么时候起的？
+ps -o pid,lstart,etime -p $(pgrep -f hermes-skill-proxy.py | head -1)
+# ② 目标变量到底在不在？
+sudo -n tr '\0' '\n' < /proc/$(pgrep -f hermes-skill-proxy.py | head -1)/environ \
+  | grep -E "^(HERMES_TIMEOUT|SKILL_NAME)="
+# ③ unit 文件里有没有？
+sudo -n grep -n "Environment=" /etc/systemd/system/hermes-skill-proxy.service
+```
+
+| 进程启动时间 vs unit 改动时间 | environ 里有目标变量？ | 动作 |
+|---|---|---|
+| 早于 unit 改动 | ❌ 没有 | **要 restart**（并按陷阱 2 带重试做健康检查） |
+| **晚于 unit 改动** | ✅ **有** | ⭐ **已部署 —— 不用 restart** |
+| 晚于 unit 改动 | ❌ 没有 | ⚠️ unit 写错了 → 查 `Unknown key name`（陷阱 6） |
+| 早于 unit 改动 | ✅ 有 | 代码默认值恰好相同 → 仍建议 restart 让 unit 生效 |
+
+**💡 通则：cron 报告要写「证据」，不是写「我部署了」。**
+本轮报告的正确写法是：
+> 「restart 是**姊妹 KB 的 cron** 做的（证据：`ExecMainStartTimestamp` = 11:02:58，
+> environ 里 `HERMES_TIMEOUT=1800` 在位）。**证据成立即算闭环**，不必重新 restart 打断对方探针。」
+
+**⚠️ 前提**：必须**先查并发**再决定 restart ——
+`ps aux | grep -E "check_e2e_request|crawler.py|refresh_drift"` 有输出就说明姊妹在跑，
+此时**任何** restart 都是净伤害（陷阱 1）。
+
+> 📌 相关的「补丁写了 ≠ 上线」判据见 `references/proxy-runtime-freshness.md` §陷阱 4；
+> 「并发 restart 打断探针」见 `references/shared-proxy-service-pitfalls.md` §陷阱 1。
+
 > ⚠️ 这是**系统级** unit，必须 `sudo -n`（本机免密可用）。
 > 不带 sudo 会报 `Interactive authentication required`。
 > `systemctl --user cat hermes-skill-proxy.service` **返回不了任何东西**

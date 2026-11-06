@@ -1,8 +1,8 @@
 ---
 name: inexbot-knowledge-base
 description: "纳博特科技知识库 RAG：每天定时爬取 doc.inexbot.com，由 hermes-skill-proxy 在请求时进行内存检索并注入 system prompt。"
-version: 2.18.0
-last_verified: 2026-11-05
+version: 2.19.0
+last_verified: 2026-11-06
 author: Hermes Agent
 license: MIT
 metadata:
@@ -31,11 +31,11 @@ metadata:
 |------|-----|
 | 源站 | https://doc.inexbot.com |
 | 内容 | 纳博特控制器/示教器/工艺/通讯等技术文档 |
-| 页面总数 | **558** 篇（中文站点，2026-10-23 确认；557 → 558 后连续持平） |
+| 页面总数 | **559** 篇（中文站点；2026-11-06 上游新增 1 页「纳博特机器人自动标定系统NexAutoCail 性能测试使用手册_单靶球」→ 558 → 559；此前 557 → 558 后连续持平 17 次） |
 | 存储路径 | `~/.hermes/kb/inexbot/` |
 | 索引文件 | `~/.hermes/kb/inexbot/index.json` |
 | Markdown | `~/.hermes/kb/inexbot/md/` |
-| 原始 HTML | `~/.hermes/kb/inexbot/raw/`（558 个，供 `rebuild_from_cache.py` 复用） |
+| 原始 HTML | `~/.hermes/kb/inexbot/raw/`（559 个，供 `rebuild_from_cache.py` 复用） |
 | 状态快照 | `~/.hermes/kb/inexbot/.crawl_state.json`（探针写的基线，用于字节级 diff） |
 | BASE_URL | `https://doc.inexbot.com` |
 
@@ -115,13 +115,22 @@ python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/crawler.py 
 | `scripts/verify_kb.py` | **全量回归**：索引完整性 + slug 契约 + 检索链路 + 引用链接实网可达性（2026-10-25 新增） |
 | `scripts/check_e2e_request.py` | **端到端请求探针**（2026-10-31 新增）：proxy→gateway→LLM 真实打一次，连打 N 次，**唯一能抓到 timeout 类故障的检查** |
 | `scripts/diagnose_502_timeout.py` | **502 超时归因探针**（2026-11-03 新增）：把「proxy 返回 502」定位到具体层 —— 算 elapsed 是否撞 proxy timeout、查 gateway 侧最终有没有完成 |
+| `scripts/check_proxy_env.py` | **线上环境变量守卫**（2026-11-06 新增）：校验 proxy **运行进程**真正继承的 5 个环境变量 + `/etc` unit + repo 模板三处 sha12 逐项一致。**hash-only 输出**，不泄露密钥明文（避开 Hermes 输出脱敏误判）。`--units` 额外解析两份 unit |
+
+> 💡 **别再手搓那三条命令查部署状态** —— 用 `check_proxy_env.py`（2026-11-06 从姊妹 KB 同步）：
+> ```bash
+> /usr/bin/python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/check_proxy_env.py --units
+> # exit 0 = 线上 5 个变量到位且 == 代码默认值，两份 unit 逐项一致
+> # exit 1 = 有缺失/不一致（脚本会区分「unit 没写」vs「没 restart」）
+> # exit 2 = 找不到 proxy 进程
+> ```
 
 **改了 `crawler.py` 的 `slugify()` 或清洗逻辑后**，不要直接 `--force`（会清空 raw 缓存、
-重抓 558 页），用 `rebuild_from_cache.py` 即可。之后跑 `check_crawl_state.py` 验证。
+重抓 559 页），用 `rebuild_from_cache.py` 即可。之后跑 `check_crawl_state.py` 验证。
 
 ### ⚠️ cron 的交付物是「验证闭环」，不只是「爬虫跑过了」
 
-**「crawler 报 558/558 成功」不是交付物，是起点。** 增量爬虫的「成功」只意味着
+**「crawler 报 559/559 成功」不是交付物，是起点。** 增量爬虫的「成功」只意味着
 「raw/ 和 md/ 已存在 → 跳过 → 没报错」，它对**上游正文被改 / 引用链接双重编码 /
 md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感**，
 而它们的共同特征是：**所有表层健康检查全绿，但用户拿到的是坏结果**。
@@ -221,6 +230,11 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 > 脚本会实网 curl，每个 KB 抽 12 条 URL，耗时约 20–40 秒。
 > 退出码 1 = 有 FAIL，可直接用于 cron 判定。
 >
+> ⚠️ **客户端 timeout 必须 > proxy 的上游 timeout**（2026-11-06 起默认 **1860s**，
+> 对应 proxy `HERMES_TIMEOUT=1800`）。此前 proxy 是 300s 时用 360；
+> **改大 proxy 就必须同步改大客户端**，否则长尾请求会被客户端先掐断 →
+> 拿到 `000`/exit 28，**而不是真实的 502** → 故障形态被伪装。
+>
 > ⚠️ **退出码 1 不一定是本 KB 的问题** —— `verify_kb.py` 同时检查两个 KB，姊妹 KB
 > `inexbot-open` 的历史遗留项会让它恒定报 6 项 FAIL。
 > **看失败列表的 `[KB 名]` 前缀分组**（2026-10-26 已给 `verify_kb.py` 加上归属），
@@ -280,6 +294,7 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 | 文件 | 覆盖内容 |
 |---|---|
 | **`references/shared-proxy-service-pitfalls.md`** | ⭐ **两个 KB 共用的 proxy 服务运维坑（跨 KB 权威来源）**：并发 restart 打断探针、restart 后健康检查必须重试、HTTP 状态码判读表、并发 commit 良性竞态、commit message 必须纯 ASCII（tirith `confusable_text`）、policy 拦截总清单、**§陷阱 9：终端输出里 `hermes...arch` 是脱敏不是截断**、**§陷阱 10：proxy 上游 120s timeout → 查手册类问题随机 502（已修）**、**§陷阱 11：漏拼 `.md` 后缀 → 0/558 假阳性**、**§陷阱 12：journal 500/502 计数必须按进程启动时间切片**、**§陷阱 13：姊妹 KB 的 agent 会直接改你 skill 自己的 SKILL.md**、**§陷阱 14：报告写「遗留：无」但工作其实没提交**、**§陷阱 15：`--amend` 后 push → non-fast-forward（不是网络问题！修法是 reset --hard 而非 rebase）**、**§陷阱 16：普通箭头 `→` 也会被 `tirith:variation_selector` 拦**、**§陷阱 17：proxy 300s timeout < gateway 900s → 偶发 502（含 arrival↔response 归因法）**、**§陷阱 18：token 比对字段名写错 → 全量假阳性**、**§陷阱 19：`process(wait)` clamp 60s → 长任务用 background+notify**、基线速查 |
+| **`references/crawl-state-2026-11-06.md`** | ⭐ **本 KB 最新基线快照**（2026-11-06）：**上游新增 1 页 → 558 → 559**（连续 17 次持平后首次增长）/ index 1,728,927 bytes / 新页「纳博特机器人自动标定系统NexAutoCail 性能测试使用手册_单靶球」24KB / slug 契约 559/559 / 孤儿 md 0 / token 级 0 不一致 / 短 snippet **真静默降级 0** / 引用链接 42/42 全 200 / **proxy 内存索引仍 558 → 12:03 自动重载自愈** / **「近空 md 23 条」= 伺服报错占位页，非故障** |
 | **`references/crawl-state-2026-11-03.md`** | ⭐ **本 KB 最新基线快照**（2026-11-03）：558 篇 / index 1,722,769 bytes / IDENTICAL / slug 契约 558/558 / **孤儿 md 精确计数 0** / token 级 0 不一致 / **端到端 11/12 —— 1 次 502 @ 300.1s（proxy 300s < gateway 900s）** / 决定性证据（gateway 侧 1270s 才完成）/ 正常延迟区间 33–164s / 上一轮成果**又一次**跨 session 泄漏未提交 |
 | **`references/crawl-state-2026-11-04.md`** | ⭐ **本 KB 最新基线快照**（2026-11-04）：558 篇 / index 1,722,769 bytes / IDENTICAL / slug 契约 558/558 / 孤儿 md 0 / token 级 0 不一致 / **端到端 12/12 全 200（最慢 151.7s；含姊妹并发共 34 次请求 0 次 502）** / **超时分层更正（inactivity ≠ 墙钟）** / 注入体积 11.3k–21.0k 字符 / **502 修复只做了一半（unit 已改、服务未重启）** |
 | **`references/crawl-state-2026-11-05.md`** | ⭐ **本 KB 最新基线快照**（2026-11-05）：558 篇 / index 1,722,769 bytes / IDENTICAL / slug 契约 558/558 / 孤儿 md 0 / token 级 0 不一致 / **⭐ 502 修复「真正上线」—— 运行进程 environ 里 `HERMES_TIMEOUT=1800` 已生效（由姊妹 KB 的 cron 顺带 restart 部署）** / 引用链接 39/39 全 200 / **陷阱 11 三连假阳性指纹**（slug 契约 0/558 + 孤儿=全量 + 检索正常 ⇒ 必是脚本自己写错） |
@@ -293,8 +308,8 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 
 ### `refresh_drift.py` —— 日常维护的推荐入口
 
-`crawler.py` 是增量的，「558/558 成功」不代表上游没变；`crawler.py --force` 能发现漂移，
-但它会 `rmtree` 掉整个 `raw/`（247MB / 558 页），重抓期间缓存全空，中途网络失败就会丢页。
+`crawler.py` 是增量的，「559/559 成功」不代表上游没变；`crawler.py --force` 能发现漂移，
+但它会 `rmtree` 掉整个 `raw/`（247MB / 559 页），重抓期间缓存全空，中途网络失败就会丢页。
 
 `refresh_drift.py` 取两者之长：
 
@@ -303,7 +318,7 @@ python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/refresh_dri
 python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/refresh_drift.py --dry-run  # 只报告差异
 ```
 
-- 重新抓取**全部** 558 页 → 能发现所有上游漂移（不只是抽样的 25 页）
+- 重新抓取**全部** 559 页 → 能发现所有上游漂移（不只是抽样的 25 页）
 - **只在内容真的变了时**才覆盖本地 `raw/` + `md/` → 缓存始终完整
 - 抓取失败的页面**保留旧缓存**并计入 failed，不会静默丢页
 - 自动清理 sitemap 里已下线页面的孤儿 md/raw
@@ -311,7 +326,7 @@ python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/refresh_dri
 - 分类：`SAME` / `IMG_ONLY`（仅 VitePress 图片 hash 变化，不算漂移）/ `CONTENT` / `NEW`
 - 退出码：0 = 正常，1 = 有抓取失败或正文变更
 
-> 耗时约 5 分钟（558 页 / 6 并发）。日常 cron 只跑 `crawler.py` 即可；
+> 耗时约 5 分钟（559 页 / 6 并发）。日常 cron 只跑 `crawler.py` 即可；
 > 发现 `check_crawl_state.py` 报 `CONTENT-DRIFT` 时再跑这个。
 
 

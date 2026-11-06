@@ -17,7 +17,11 @@
     1 = 出现非 200（详见 stderr 判读）
 
 ⚠️ 必须用 /usr/bin/python3（沙盒 python3 没装 requests/flask）。
-⚠️ 客户端 timeout 必须 > proxy 的上游 timeout（现 300s）→ 用 -m 360。
+⚠️ 客户端 timeout 必须 > proxy 的上游 timeout：
+   2026-11-05 起 proxy 上游已是 **1800s**（unit Environment="HERMES_TIMEOUT=1800"，
+   proxy repo commit 846b3de）→ 默认用 **1860**。
+   （此前 proxy 是 300s 时用 360；改大 proxy 就必须同步改大客户端，否则长尾请求
+    会被客户端先掐断 → 拿到 000/exit 28，而不是真实的 502。）
 ⚠️ timeout 类故障是【随机】的 —— 单次 200 不能证明通过，必须连打多次。
 """
 
@@ -32,8 +36,25 @@ PROXY_URL = "http://localhost:8643/v1/chat/completions"
 GATEWAY_URL = "http://localhost:8642/v1/chat/completions"
 API_KEY = "hermes-website-search"
 
-# 故意用不存在的 model，让 gateway 快速拒绝，从而快速区分「检索崩了」与「网关慢」
+# 用一个不存在的 model 名。
+#
+# ⚠️ 2026-11-03 实测更正：**这个 model 名并不会让 gateway 快速拒绝。**
+# gateway 的 `api_server.py:1080` `model_name = body.get("model", ...)` 只用于
+# **响应元数据**；真正建 agent 的地方是 `:824` `_resolve_gateway_model()` +
+# `:836` `AIAgent(model=model, ...)` —— **用的是配置里的模型，忽略请求体的 model**。
+# → 每一次探针请求都是一次**完整的 agent 跑**（system prompt 含 KB 注入的
+#    12k–20k 字符 ≈ 6k–10k tokens），单次 30–140s，偶发停顿可到几百秒。
+#
+# 保留这个假 model 名的唯一价值：**它不会误命中真实模型**（万一将来 gateway
+# 改成校验 model 名，这个名字仍能被识别为非法）。
 FAKE_MODEL = "definitely-not-a-real-model-xyz"
+
+# 判读补充（2026-11-03 实测）：
+#   502 + body 含 "read timeout=300" → **proxy 的 HERMES_TIMEOUT 到点放弃**，
+#     gateway 侧那次的真实耗时可能是 313s / 471s / 1270s / 1457s（agent.log 的
+#     aiohttp access 行可证），甚至最终返回 200 —— 即「proxy 比 gateway 先放弃」。
+#     三层 timeout：provider read 900s / agent.gateway_timeout 1800s / proxy 300s。
+#   500 → 检索崩了（slug 契约断裂等）   000 → 客户端 -m 太小
 
 DEFAULT_QUERIES = [
     "C1102 控制器 通讯接口 有哪些",
@@ -88,7 +109,8 @@ def classify(status, body):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=4, help="每个查询连打几次（默认 4）")
-    ap.add_argument("--timeout", type=int, default=360, help="客户端超时秒（默认 360）")
+    ap.add_argument("--timeout", type=int, default=1860,
+                    help="客户端超时秒（默认 1860）—— 必须大于 proxy 的上游 timeout")
     ap.add_argument("--query", action="append", default=None, help="自定义查询，可重复")
     ap.add_argument("--gateway-probe", action="store_true",
                     help="额外直打 gateway 8642 量真实耗时")
