@@ -1,7 +1,7 @@
 ---
 name: inexbot-knowledge-base
 description: "纳博特科技知识库 RAG：每天定时爬取 doc.inexbot.com，由 hermes-skill-proxy 在请求时进行内存检索并注入 system prompt。"
-version: 2.20.0
+version: 2.21.0
 last_verified: 2026-11-07
 author: Hermes Agent
 license: MIT
@@ -109,6 +109,7 @@ python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/crawler.py 
 |---|---|
 | `scripts/crawler.py` | 主爬虫（sitemap 发现 + 增量缓存） |
 | `scripts/retrieve.py` | 离线检索兜底（proxy 注入不够用时） |
+| `scripts/scan_kb_topic.py` | **按关键词枚举某主题的全部页面**（扫 `index.json` 的 title/description → 输出 key + 官方链接 + md slug + 片段长度）。回答「X 工艺/协议/模块 的手册参数」这类**主题性**问题前先跑它，一次列全，避免靠 proxy top-5 试错 |
 | `scripts/check_crawl_state.py` | 状态探针：索引健康度 + 字节级 diff + **上游漂移抽样** |
 | `scripts/rebuild_from_cache.py` | 改清洗逻辑后，从 `raw/` 缓存重建 md + index（不联网） |
 | `scripts/refresh_drift.py` | **全量漂移刷新**：重抓全部页面，只覆盖真变了的内容（2026-10-24 新增） |
@@ -316,6 +317,7 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 | **`references/crawl-state-2026-10-31.md`** | 10-31 基线快照：558 篇 / index 1,722,769 bytes / IDENTICAL / token 级 0 不一致 / **端到端实测揪出 120s timeout 缺陷并修复** / 脱敏误判的实证与更正 |
 | `references/proxy-runtime-freshness.md` | proxy 内存索引新鲜度（含**正确的 token 级比对方法**）、重启判据、stdout 块缓冲陷阱、重载链断链、进程内检索链路测试 |
 | `references/upstream-url-migration.md` | 上游改 URL 路径的完整诊断流程（sitemap 查新路径 → 404/200 确认 → diff 判搬家 → refresh_drift 清孤儿 → 重启 proxy） |
+| **`references/stamping-process-manuals.md`** | ⭐ **冲压工艺 2.0 / 3.0 手册参数设置速查**（2026-11-07 新增）：**两册参数体系完全不同不能混用**（2.0 = 9 个板块；3.0 = 工位角色 + 隐藏的冲压参数面板，IO 从语义名换成固定 X/Y 端口号）／**版本归属 ground truth = 解析 raw HTML 侧边栏分节头**（实测属 25.01 目录；旧结论「只有 22.07 有」是错的）／**`read_file` `unchanged` + `content_returned:false` 陷阱**／2.0 九大板块逐项参数／3.0 功能启用 13 项 + IO + 进阶 + 速度 + 换向 + 电磁铁／3.0 码垛参数／固定 IO 端口表 X02–X16 & Y05–Y15／冲压指令各点信号逻辑表／报警→参数对照表 |
 | `references/hermes-skill-proxy-deployment.md` | proxy 部署步骤、systemd unit 位置、`User=ecs-user` 等坑 |
 
 ### `refresh_drift.py` —— 日常维护的推荐入口
@@ -416,8 +418,23 @@ doc.inexbot.com 上很多「常见问题/伺服报错」系列的页面就是 1�
 **标准取数路线**（见 `references/large-family-kb-navigation.md` §7）：
 1. **一次扫 `index.json` 的 `value.title`** → 列出该主题的全部页面 + 官方链接 + md 位置（比逐个 read_file 试错快一个数量级）。
 2. `wc -l` 确认体量 → 分段 `read_file(offset=…, limit=…)` 或 `sed -n 'a,bp'`。
+   > ⚠️ **`read_file` 的 `unchanged` 去重陷阱（2026-11-07 实测）**：返回体若是
+   > `{"status": "unchanged", "dedup": true, "content_returned": false}` →
+   > **这次没有返回任何内容**，且它的判定基于文件读缓存而非「本会话是否读过」，
+   > 所以**上下文里可能根本不存在「先前那次的结果」**。
+   > **判据：看 `content_returned`** —— `true` 才有内容可用。
+   > `false` 时唯一可靠的兜底是 `terminal` + `sed -n 'a,bp'`（636 / 330 行手册用 5 段 sed 一次读完）。
 3. **多代手册并存**（代次常只在标题末尾，如「冲压工艺2.0手册」/「冲压工艺3.0手册」）：按 title 包含匹配一次列全 → 回答开头先声明有哪几代、参数名不同 → 再按代次分节。
+   > ⚠️ **两代的参数体系可能完全不同，不能混用**（实测：2.0 按「9 个板块」组织，3.0 按「工位角色 + 冲压参数面板」组织，IO 从语义名变成固定 X/Y 端口号）。
 4. **版本边界自己核**：扫 index 标题就知道某手册只存在于哪个固件版本（例：冲压工艺手册只有 22.07 的 2.0/3.0 两册，24.03/25.01 未收录）→ 别在别的版本上类推参数名，答案末尾写「其他版本 KB 未收录 → 无法确认」。
+   > ⚠️ **2026-11-07 更正：这条对「专机手册」类主题不成立。** 冲压工艺两册挂在
+   > `操作手册/专机手册/冲压专机/` 下，**title 和 path 都不带版本号** → 扫 index 标题
+   > **证不出**版本归属。**ground truth 是解析 raw HTML 侧边栏**：把
+   > `>22.07版本<` / `>24.03版本<` / `>25.01版本<` 这些分节头的字符位置，与侧边栏
+   > `<a href="/zh/...">` 的字符位置对齐，看目标页落在哪个分节下。
+   > 实测结论：冲压工艺两册属 **25.01 版本目录**，22.07 / 24.03 目录下没有冲压工艺专机手册。
+   > ⇒ 「只有 22.07 有」这个旧结论**是错的**，别再照抄。
+   > 完整方法 + 脚本见 `references/stamping-process-manuals.md` §2。
 5. **⚠️ 别把文件名当版本归属（2026-11-01 实测）**：冲压工艺 2.0/3.0 手册的 md 文件名是 `zh-操作手册-专机手册-冲压专机-冲压工艺{2.0,3.0}手册.md`，**不含「22.07版本」字样**（早期在 22.07 子目录，上游 2026-10-27 搬到了「专机手册/冲压专机」）。同时 22.07 的 `zh-操作手册-22.07版本-专用工艺手册.md` 看起来像「各工艺专章」，但 **grep「冲压」= 0 命中**，不含冲压内容 → **判定某工艺属于哪一版，必须用 index.json 标题全量扫 + grep 正文关键词，不能靠文件名猜**。
 
 ## 常见陷阱

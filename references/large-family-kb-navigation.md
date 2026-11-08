@@ -135,6 +135,16 @@ for path, v in d.items():
 
 **Step 1 — 一次扫 `index.json` 标题，列出该主题的全部页面**
 
+```bash
+python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/scan_kb_topic.py 冲压
+# 加 --links 只输出可点击的 Markdown 链接行；--kb open 扫姊妹库；--both 两个都扫
+```
+
+脚本做的事：扫 `index.json` 的 `title` / `description` → 输出 key + 官方链接 + md slug + 片段长度。
+**回答「X 工艺/协议/模块 的手册参数」这类主题性问题前先跑它** —— 一次列全，避免靠 proxy top-5 试错。
+
+手工等价写法（一次性脚本，不必落盘）：
+
 ```python
 import json, os
 for kb in ["/home/ecs-user/.hermes/kb/inexbot", "/home/ecs-user/.hermes/kb/inexbot-open"]:
@@ -148,7 +158,15 @@ for kb in ["/home/ecs-user/.hermes/kb/inexbot", "/home/ecs-user/.hermes/kb/inexb
 
 **Step 2 — `wc -l` 确认体量**，再决定读法。
 
-**Step 3 — 分段 `read_file(offset=…, limit=…)`**，或 terminal `sed -n 'a,bp'`。注意 `read_file` 命中同一文件时会返回 `unchanged` 去重，此时先前那次的结果仍在上下文里，直接引用即可。
+**Step 3 — 分段 `read_file(offset=…, limit=…)`**，或 terminal `sed -n 'a,bp'`。
+
+> ⚠️ **`read_file` 的 `unchanged` 去重陷阱（2026-11-07 实测）**：返回体若是
+> `{"status": "unchanged", "dedup": true, "content_returned": false}` → **这次没有返回任何内容**。
+> 它的 `unchanged` 判定基于**文件读缓存**而非「本会话是否读过」，所以**上下文里可能根本不存在
+> 「先前那次的结果」**（本 session 实测：第一次读这两本手册就撞上）。
+> **判据：看 `content_returned`** —— `true` 才有内容可用。
+> `false` 时唯一可靠的兜底是 `terminal` + `sed -n 'a,bp'`
+> （实测 636 行 + 330 行两本手册用 5 段 sed 一次读完，零遗漏）。
 
 **Step 4 — 手动构造官方链接**：`https://doc.inexbot.com` + key（open 侧是 `https://open.inexbot.com` + key）。
 
@@ -166,9 +184,39 @@ KB 的 md 文件名是中文，`search_files` 按内容 pattern 检索中文正�
 
 同一主题常有多个代次的手册并存（冲压工艺 2.0 / 3.0）。代次通常**只在标题末尾**（`冲压工艺2.0手册` / `冲压工艺3.0手册`），主体名相同 → **按 title 包含匹配，一次列出所有代次**，然后在回答开头先说明「有哪几代并存，参数名不同」，再按代次分节列出。
 
-### 7.4 版本边界要自己核
+### 7.4 版本边界要自己核（⚠️ 有两种情形，判法不同）
 
-`index.json` 里有全部页面标题 → 扫一遍就知道某主题手册**只存在于哪个固件版本**（例如冲压工艺手册只有 22.07 版的 2.0 / 3.0 两册，24.03 / 25.01 未收录）。不要默认"最新版本也有"，也不要在别的版本上类推参数名。
+**情形 A —— 手册按固件版本分目录**（大多数操作手册，如 `22.07版本/`、`24.03版本/`、`25.01版本/`）：
+`index.json` 里有全部页面标题 → 扫一遍就知道某主题手册只存在于哪个固件版本。
+不要默认"最新版本也有"，也不要在别的版本上类推参数名。
+
+**情形 B —— 手册按主题/机型分目录（不按版本）**（例：冲压工艺两册挂在 `操作手册/专机手册/冲压专机/`）：
+**title 和 path 都不带版本号 → 扫 index 标题证不出版本归属。**
+
+**情形 B 的 ground truth：解析 raw HTML 侧边栏** —— 把分节头（`>22.07版本<`、
+`>24.03版本<`、`>25.01版本<`）的字符位置，与侧边栏 `<a href="/zh/...">` 的字符位置对齐，
+看目标页落在哪个分节下：
+
+```python
+import re
+from pathlib import Path
+p = Path.home()/".hermes/kb/inexbot/raw/zh-操作手册-专机手册-冲压专机-冲压工艺3.0手册.html"
+t = p.read_text(encoding="utf-8", errors="ignore")
+heads = [(m.start(), m.group(0)) for m in re.finditer(r">(2[0-9]\.0[0-9]版本)<", t)]
+for m in re.finditer(r'href="(/zh/[^"]*%E5%86%B2%E5%8E%8B[^"]*)"', t):
+    ver = "?"
+    for hpos, htxt in heads:
+        if hpos < m.start(): ver = htxt
+    print(ver, "->", m.group(1))
+```
+
+> ⚠️ **2026-11-07 实测结论修正**：旧版本此节写「冲压工艺手册只有 22.07 的 2.0/3.0 两册，
+> 24.03/25.01 未收录」—— **这个结论是错的**。按上述方法实测：冲压工艺两册出现在
+> **25.01 版本分节**内，22.07（24 条链接）与 24.03（30 条链接）分节里都没有冲压工艺专机手册。
+> ⇒ 准确表述是「冲压工艺手册**归属 25.01 版本目录**」。
+> ⇒ 并且**仍不能对固件版本差异做类推**：24.03 固件上跑冲压工艺时参数名是否与 25.01 一致，
+> KB 无据可查 → 回答时明写「无法确认，建议索取对应版本出厂参数配置单」。
+> 完整速查见 `references/stamping-process-manuals.md`。
 
 ---
 
@@ -182,5 +230,18 @@ KB 的 md 文件名是中文，`search_files` 按内容 pattern 检索中文正�
 6. 沉淀成 references 速查表，别每次重检索。
 7. 建索引时**扫 H1 标题**（一次 glob），别逐条读正文。
 8. 溯源链接从 `index.json` 的 key + title **批量生成**。
-9. **长手册主题**：先扫 `index.json` 标题一次列全页面 → `wc -l` → 分段读全文 → 按代次分节。proxy 的 4000 字符 snippet 装不下。
-10. **多代手册并存**要在答案开头声明；**版本边界**自己用 index 标题核，别默认别的版本也有。
+9. **长手册主题**：先扫 `index.json` 标题一次列全页面 → `wc -l` → 分段读全文 → 按代次分节。proxy 的 4000 字符 snippet 装不下。用 `scripts/scan_kb_topic.py <关键词>` 一步到位。
+10. **多代手册并存**要在答案开头声明；**版本边界**自己核 —— 手册按版本分目录的扫 index 标题即可，**按主题/机型分目录的（title/path 不带版本号）必须解析 raw HTML 侧边栏分节头**，别用启发式猜。
+11. **`read_file` 返回 `content_returned: false` 就是没给内容**，别以为「先前那次在上下文里」→ 改用 `sed -n 'a,bp'`。
+12. **两代手册的参数体系可能完全不同** —— 名字相同不等于含义相同，回答必须分节、不得混用。
+
+---
+
+## 9. 冲压工艺主题（实例）
+
+冲压工艺 2.0 / 3.0 手册是本类主题的样板：**两册参数体系完全不同**（2.0 按 9 个板块组织、
+3.0 按工位角色 + 隐藏的冲压参数面板组织，IO 从语义名变成固定 X/Y 端口号），
+且**归属 25.01 版本目录**（靠扫 index 标题证不出来）。
+
+完整参数速查（2.0 九大板块 / 3.0 功能启用 13 项 / IO 端口表 / 冲压指令信号逻辑 / 报警→参数对照）：
+[`references/stamping-process-manuals.md`](stamping-process-manuals.md)
