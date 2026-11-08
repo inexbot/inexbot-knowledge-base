@@ -1,8 +1,8 @@
 ---
 name: inexbot-knowledge-base
 description: "纳博特科技知识库 RAG：每天定时爬取 doc.inexbot.com，由 hermes-skill-proxy 在请求时进行内存检索并注入 system prompt。"
-version: 2.21.0
-last_verified: 2026-11-07
+version: 2.22.0
+last_verified: 2026-11-08
 author: Hermes Agent
 license: MIT
 metadata:
@@ -109,7 +109,7 @@ python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/crawler.py 
 |---|---|
 | `scripts/crawler.py` | 主爬虫（sitemap 发现 + 增量缓存） |
 | `scripts/retrieve.py` | 离线检索兜底（proxy 注入不够用时） |
-| `scripts/scan_kb_topic.py` | **按关键词枚举某主题的全部页面**（扫 `index.json` 的 title/description → 输出 key + 官方链接 + md slug + 片段长度）。回答「X 工艺/协议/模块 的手册参数」这类**主题性**问题前先跑它，一次列全，避免靠 proxy top-5 试错 |
+| `scripts/scan_kb_topic.py` | **按关键词枚举某主题的全部页面**（扫 `index.json` 的 title/description → 输出 key + 官方链接 + md slug + 片段长度）。回答「X 工艺/协议/模块 的手册参数」这类**主题性**问题前先跑它，一次列全，避免靠 proxy top-5 试错。⚠️ **2026-11-08 已修**：md 路径原用 `key.lstrip('/').replace('/','-')` 只能解析 **1/560**（crawler 是**先 unquote** 再 `/`→`-`）；现与 crawler 同序，**560/560** |
 | `scripts/check_crawl_state.py` | 状态探针：索引健康度 + 字节级 diff + **上游漂移抽样** |
 | `scripts/rebuild_from_cache.py` | 改清洗逻辑后，从 `raw/` 缓存重建 md + index（不联网） |
 | `scripts/refresh_drift.py` | **全量漂移刷新**：重抓全部页面，只覆盖真变了的内容（2026-10-24 新增） |
@@ -285,6 +285,29 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 > 本轮实测：index 侧 196 条 `== 800`，但 proxy 侧 25 条检索结果**无一条 == 800** ✅
 > 只看 index 的 snippet 长度就报「196 条静默降级」是**误判**。
 
+> ⚠️ **「页面本身短」vs「正文被截断」要比「字符数」，不能比「字节数」**（2026-11-08 实测）：
+> skill 里写的判据是「`md_bytes == snippet_len` → 页面本身就很短（正常）」。
+> **在中文页面上这个判据会误判**：中文 1 字 = **3 字节**，
+> 例：`0x0050 - 风扇故障报警（未实现）` 的 md 是 **71 字符 / 157 字节**，
+> proxy snippet 是 **71 字符** → 其实是**全文命中**，
+> 但比字节（157 ≠ 71）会被误判成「md 比 snippet 长 → 要查」。
+>
+> **✅ 正确判据**（proxy 侧 snippet **字符数** vs md **字符数**）：
+>
+> | 判据 | 含义 |
+> |---|---|
+> | proxy snippet **== 800** | **真静默降级**（回落到了 index 摘要） |
+> | proxy snippet **chars == md chars** | **全文命中** ✅ |
+> | proxy snippet **chars < md chars** | md 本身长 → 命中 4000 字符上限（设计如此） |
+>
+> 2026-11-08 实测（30 条 proxy 结果）：真静默降级 **0**、全文命中 13、4000 上限截断 17。
+
+> ⚠️ **用 proxy 返回的 `url` 反查 `index.json` 要先处理 `&` / `%26`**（2026-11-08 实测）：
+> proxy 返回的 url 里 `&` 被编码成 **`%26`**，而 `index.json` 的 key 里是**字面 `&`**
+> （例：key = `/zh/...%E9%80%9A%E8%AE%AF%E5%8D%8F%E8%AE%AE&%E5%9C%B0%E5%9D%80%E7%A0%81`）。
+> 直接 `url.replace(base, "")` 查表 → **miss → 误报「md not found」**（该 md 其实存在）。
+> **✅ 查表要两步**：先试精确匹配，miss 再 `unquote(path)` 匹配。
+
 > ⚠️ **proxy 内存索引有两个结构，比 token 必须用 `_doc_scores`**：
 > - `_index_data['inexbot']` → **原始 item dict**（`title` / `description` 是**字符串**）
 > - `_doc_scores['inexbot']` → **分词后的 token 集合**（`title_tokens` / `desc_tokens` / `content_tokens`）
@@ -306,7 +329,8 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 | 文件 | 覆盖内容 |
 |---|---|
 | **`references/shared-proxy-service-pitfalls.md`** | ⭐ **两个 KB 共用的 proxy 服务运维坑（跨 KB 权威来源）**：并发 restart 打断探针、restart 后健康检查必须重试、HTTP 状态码判读表、并发 commit 良性竞态、commit message 必须纯 ASCII（tirith `confusable_text`）、policy 拦截总清单、**§陷阱 9：终端输出里 `hermes...arch` 是脱敏不是截断**、**§陷阱 10：proxy 上游 120s timeout → 查手册类问题随机 502（已修）**、**§陷阱 11：漏拼 `.md` 后缀 → 0/558 假阳性**、**§陷阱 12：journal 500/502 计数必须按进程启动时间切片**、**§陷阱 13：姊妹 KB 的 agent 会直接改你 skill 自己的 SKILL.md**、**§陷阱 14：报告写「遗留：无」但工作其实没提交**、**§陷阱 15：`--amend` 后 push → non-fast-forward（不是网络问题！修法是 reset --hard 而非 rebase）**、**§陷阱 16：普通箭头 `→` 也会被 `tirith:variation_selector` 拦**、**§陷阱 17：proxy 300s timeout < gateway 900s → 偶发 502（含 arrival↔response 归因法）**、**§陷阱 18：token 比对字段名写错 → 全量假阳性**、**§陷阱 19：`process(wait)` clamp 60s → 长任务用 background+notify**、基线速查 |
-| **`references/crawl-state-2026-11-07.md`** | ⭐ **本 KB 最新基线快照**（2026-11-07）：**上游新增 1 页 → 559 → 560**（连续 18 次持平后增长）/ index 1,735,196 bytes / 新页「双臂使用手册」（RTL25.01）7.8KB / slug 契约 560/560 / 孤儿 md 0 / token 级 0 不一致 / 短 snippet **真静默降级 0** / 引用链接 **51/51 全 200** / **⭐ 修掉 `check_reload_timer.py` 的假阳性（「age 落在 5h 附近」判据错误，约 70% 概率误报「重载链断了」）/ 上一轮「已提交」结论是错的 —— 实际有 124 行 + 1 脚本没进库（11-06 收尾被 HTTP 429 配额中断）** |
+| **`references/crawl-state-2026-11-08.md`** | ⭐ **本 KB 最新基线快照**（2026-11-08）：**上游零变化 → 560 持平**（连续 19 次）/ index 1,735,196 bytes（与 11-07 逐字节相同）/ **本轮 0 次网络抓取**，结论来自 60 页抽样（59 SAME + 1 IMG_ONLY）/ slug 契约 560/560 / 孤儿 md 0 / token 级 0 不一致 / **真静默降级 0** / 端到端 **12/12 全 200**（最慢 246.4s，0 次 502）/ **⭐ 修掉 `scan_kb_topic.py` 两个真 bug**（md 路径解析 1/560→560/560；snippet 长度串行串值）/ **⭐ 「短 snippet」正确判据要比字符数不是字节数**（中文 1 字=3 字节，比字节会误判）/ **⭐ proxy 返回 url 的 `&` 是 `%26`、index key 是字面 `&` → 直接查表会误报「md not found」** / **11-07 的「已提交」结论第 3 次是错的**（489 行 + 2 文件没进库，429 中断） |
+| **`references/crawl-state-2026-11-07.md`** | 2026-11-07 基线快照：**上游新增 1 页 → 559 → 560**（连续 18 次持平后增长）/ index 1,735,196 bytes / 新页「双臂使用手册」（RTL25.01）7.8KB / slug 契约 560/560 / 孤儿 md 0 / token 级 0 不一致 / 短 snippet **真静默降级 0** / 引用链接 **51/51 全 200** / **⭐ 修掉 `check_reload_timer.py` 的假阳性（「age 落在 5h 附近」判据错误，约 70% 概率误报「重载链断了」）/ 上一轮「已提交」结论是错的 —— 实际有 124 行 + 1 脚本没进库（11-06 收尾被 HTTP 429 配额中断）** |
 | **`references/crawl-state-2026-11-06.md`** | 11-06 基线快照：559 篇 / index 1,728,927 bytes / 新页「纳博特机器人自动标定系统NexAutoCail 性能测试使用手册_单靶球」24KB / slug 契约 559/559 / 孤儿 md 0 / token 级 0 不一致 / 短 snippet **真静默降级 0** / 引用链接 42/42 全 200 / **proxy 内存索引仍 558 → 12:03 自动重载自愈** / **「近空 md 23 条」= 伺服报错占位页，非故障** / ⚠️ **该轮的成果实际未提交（被 429 中断），11-07 已补做** |
 | **`references/crawl-state-2026-11-03.md`** | ⭐ **本 KB 最新基线快照**（2026-11-03）：558 篇 / index 1,722,769 bytes / IDENTICAL / slug 契约 558/558 / **孤儿 md 精确计数 0** / token 级 0 不一致 / **端到端 11/12 —— 1 次 502 @ 300.1s（proxy 300s < gateway 900s）** / 决定性证据（gateway 侧 1270s 才完成）/ 正常延迟区间 33–164s / 上一轮成果**又一次**跨 session 泄漏未提交 |
 | **`references/crawl-state-2026-11-04.md`** | ⭐ **本 KB 最新基线快照**（2026-11-04）：558 篇 / index 1,722,769 bytes / IDENTICAL / slug 契约 558/558 / 孤儿 md 0 / token 级 0 不一致 / **端到端 12/12 全 200（最慢 151.7s；含姊妹并发共 34 次请求 0 次 502）** / **超时分层更正（inactivity ≠ 墙钟）** / 注入体积 11.3k–21.0k 字符 / **502 修复只做了一半（unit 已改、服务未重启）** |
