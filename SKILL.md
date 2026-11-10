@@ -1,8 +1,8 @@
 ---
 name: inexbot-knowledge-base
 description: "纳博特科技知识库 RAG：每天定时爬取 doc.inexbot.com，由 hermes-skill-proxy 在请求时进行内存检索并注入 system prompt。"
-version: 2.23.0
-last_verified: 2026-11-09
+version: 2.24.0
+last_verified: 2026-11-10
 author: Hermes Agent
 license: MIT
 metadata:
@@ -31,7 +31,7 @@ metadata:
 |------|-----|
 | 源站 | https://doc.inexbot.com |
 | 内容 | 纳博特控制器/示教器/工艺/通讯等技术文档 |
-| 页面总数 | **560** 篇（中文站点；2026-11-07 上游新增 1 页「双臂使用手册」（RTL25.01）→ 559 → 560；**11-09 持平，连续 20 次**；此前 558 → 559 后连续持平 17 次） |
+| 页面总数 | **560** 篇（中文站点；2026-11-07 上游新增 1 页「双臂使用手册」（RTL25.01）→ 559 → 560；**11-10 持平，连续 21 次**；此前 558 → 559 后连续持平 17 次） |
 | 存储路径 | `~/.hermes/kb/inexbot/` |
 | 索引文件 | `~/.hermes/kb/inexbot/index.json` |
 | Markdown | `~/.hermes/kb/inexbot/md/` |
@@ -117,6 +117,9 @@ python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/crawler.py 
 | `scripts/check_e2e_request.py` | **端到端请求探针**（2026-10-31 新增）：proxy→gateway→LLM 真实打一次，连打 N 次，**唯一能抓到 timeout 类故障的检查** |
 | `scripts/diagnose_502_timeout.py` | **502 超时归因探针**（2026-11-03 新增）：把「proxy 返回 502」定位到具体层 —— 算 elapsed 是否撞 proxy timeout、查 gateway 侧最终有没有完成 |
 | `scripts/check_proxy_env.py` | **线上环境变量守卫**（2026-11-06 新增）：校验 proxy **运行进程**真正继承的 5 个环境变量 + `/etc` unit + repo 模板三处 sha12 逐项一致。**hash-only 输出**，不泄露密钥明文（避开 Hermes 输出脱敏误判）。`--units` 额外解析两份 unit |
+| `scripts/check_url_to_index_key.py` | **反向查表守卫**（2026-11-09 新增，2026-11-10 修正）：校验「proxy url → index.json key」的归一化写法没写错。⚠️ **归一化必须按 KB 分开**：`inexbot`（key 已 percent 编码）只替换 `%26`/`%2B`；`inexbot-open`（key 是明文中文）需整体 `unquote` —— 用同一条规则套两个 KB 会造成大面积假 miss（11-10 实测 93 条里 45 条查不到）。写任何「反查 md 文件」的审计脚本后都该跑它 |
+| `scripts/check_retrieval_chain.py` | **检索链路审计**（2026-11-10 新增）：按**字符数**判「真静默降级」—— proxy snippet `==800` 才是降级；`== md 字符数` 是全文命中；`< md 字符数` 是命中 4000 上限。⚠️ 必须比字符数不是字节数（中文 1 字 = 3 字节）。同时报「md 全部可定位」，**兜住审计脚本自身的查表 bug** |
+| `scripts/check_citation_links.py` | **引用链接实网可达性**（2026-11-10 新增）：按 proxy 的 `_kb_url()` 规则从 index.json 生成官方链接，对**中文路径条目**（559/560）抽样实网 GET，逐条判 200/404。`verify_kb.py` 只抽 12 条，本脚本可抽 60 条 |
 
 > 💡 **别再手搓那三条命令查部署状态** —— 用 `check_proxy_env.py`（2026-11-06 从姊妹 KB 同步）：
 > ```bash
@@ -302,10 +305,10 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 >
 > 2026-11-08 实测（30 条 proxy 结果）：真静默降级 **0**、全文命中 13、4000 上限截断 17。
 
-> ⚠️ **用 proxy 返回的 `url` 反查 `index.json` 的正确归一化（2026-11-09 实测更正）**：
+> ⚠️ **用 proxy 返回的 `url` 反查 `index.json` 的正确归一化（2026-11-09 实测，2026-11-10 再更正）**：
 > proxy 返回的 url 里，**`&` 被编码成 `%26`、`+` 被编码成 `%2B`**，
 > 而 `index.json` 的 key 里这两个字符是**字面量**（**中文则仍是 percent-encoded**）。
-> **✅ 正确做法：只替换这两个字符**
+> **✅ 对 `inexbot` 的正确做法：只替换这两个字符**
 > ```python
 > key = path.replace("%26", "&").replace("%2B", "+")
 > ```
@@ -315,6 +318,21 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 > 11-08 那版「先精确匹配，miss 再 `unquote`」也不够好 —— `+` 那条精确匹配也救不回来
 > （index key 是字面 `+`，proxy url 是 `%2B`）。
 > ⚠️ 这条曾经把「审计脚本自己的查表 bug」误报成 KB 回归（md 明明在磁盘上）。
+> 💡 **写完这类审计脚本后跑 `scripts/check_url_to_index_key.py` 验一遍归一化写法**。
+>
+> ⚠️⚠️ **2026-11-10 再更正：归一化规则必须「按 KB 分开」！**
+> 上面那条**只对 `inexbot` 成立** —— **两个 KB 的 index key 是相反的编码态**：
+>
+> | KB | key 形态 | 中文 | `&` / `+` | 需要的动作 |
+> |---|---|---|---|---|
+> | `inexbot` (doc.inexbot.com) | **已 percent 编码** | `%E6%8A%80…` | 字面 | 只换 `%26`/`%2B` |
+> | `inexbot-open` (open.inexbot.com) | **明文中文** | `上位机` | 字面 | **整体 `unquote`** |
+>
+> **判别方式**：看该 KB 的 index key 里**有没有 `%`**（= proxy `_kb_url()` 的判据）。
+> 实测：`inexbot` 559/560 key 含 `%`、**0** 个明文中文；`inexbot-open` **0** 个含 `%`、441 个明文中文。
+> ⇒ 把 `inexbot` 验证过的规则套到 `inexbot-open` 上 → **必然大面积假 miss**
+> （11-10 实测：93 条里 45 条查不到，全部是 `[inexbot-open]`）。
+> ⇒ **通则：反向查表的归一化不是「一条全局规则」，而是「每个 KB 一条」。**
 
 > ⚠️ **proxy 内存索引有两个结构，比 token 必须用 `_doc_scores`**：
 > - `_index_data['inexbot']` → **原始 item dict**（`title` / `description` 是**字符串**）
@@ -336,7 +354,8 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 
 | 文件 | 覆盖内容 |
 |---|---|
-| **`references/shared-proxy-service-pitfalls.md`** | ⭐ **两个 KB 共用的 proxy 服务运维坑（跨 KB 权威来源）**：并发 restart 打断探针、restart 后健康检查必须重试、HTTP 状态码判读表、并发 commit 良性竞态、commit message 必须纯 ASCII（tirith `confusable_text`）、policy 拦截总清单、**§陷阱 9：终端输出里 `hermes...arch` 是脱敏不是截断**、**§陷阱 10：proxy 上游 120s timeout → 查手册类问题随机 502（已修）**、**§陷阱 11：漏拼 `.md` 后缀 → 0/558 假阳性**、**§陷阱 12：journal 500/502 计数必须按进程启动时间切片**、**§陷阱 13：姊妹 KB 的 agent 会直接改你 skill 自己的 SKILL.md**、**§陷阱 14：报告写「遗留：无」但工作其实没提交**、**§陷阱 15：`--amend` 后 push → non-fast-forward（不是网络问题！修法是 reset --hard 而非 rebase）**、**§陷阱 16：普通箭头 `→` 也会被 `tirith:variation_selector` 拦**、**§陷阱 17：proxy 300s timeout < gateway 900s → 偶发 502（含 arrival↔response 归因法）**、**§陷阱 18：token 比对字段名写错 → 全量假阳性**、**§陷阱 19：`process(wait)` clamp 60s → 长任务用 background+notify**、**§陷阱 20：待办的部署可能已被姊妹 KB 完成 → 盲目 restart 会打断对方的探针**、**§陷阱 21：判「重载链是否还活着」→ 看线程的 age（⚠️ 不要用「age 落在 5h 附近」，约 70% 概率假阳性）**、**§陷阱 22：改了 proxy timeout，e2e 客户端 timeout 必须同步调大**、**§陷阱 23：共享文件同步方向不能凭行数判 →「姊妹独有行 = 0」即可 cp 覆盖**、**§陷阱 24：反向查表只做最小必要的归一化 → 整体 `unquote()` 会破坏「混合编码态」**、基线速查 |
+| **`references/shared-proxy-service-pitfalls.md`** | ⭐ **两个 KB 共用的 proxy 服务运维坑（跨 KB 权威来源）**：并发 restart 打断探针、restart 后健康检查必须重试、HTTP 状态码判读表、并发 commit 良性竞态、commit message 必须纯 ASCII（tirith `confusable_text`）、policy 拦截总清单、**§陷阱 9：终端输出里 `hermes...arch` 是脱敏不是截断**、**§陷阱 10：proxy 上游 120s timeout → 查手册类问题随机 502（已修）**、**§陷阱 11：漏拼 `.md` 后缀 → 0/558 假阳性**、**§陷阱 12：journal 500/502 计数必须按进程启动时间切片**、**§陷阱 13：姊妹 KB 的 agent 会直接改你 skill 自己的 SKILL.md**、**§陷阱 14：报告写「遗留：无」但工作其实没提交**、**§陷阱 15：`--amend` 后 push → non-fast-forward（不是网络问题！修法是 reset --hard 而非 rebase）**、**§陷阱 16：普通箭头 `→` 也会被 `tirith:variation_selector` 拦**、**§陷阱 17：proxy 300s timeout < gateway 900s → 偶发 502（含 arrival↔response 归因法）**、**§陷阱 18：token 比对字段名写错 → 全量假阳性**、**§陷阱 19：`process(wait)` clamp 60s → 长任务用 background+notify**、**§陷阱 20：待办的部署可能已被姊妹 KB 完成 → 盲目 restart 会打断对方的探针**、**§陷阱 21：判「重载链是否还活着」→ 看线程的 age（⚠️ 不要用「age 落在 5h 附近」，约 70% 概率假阳性）**、**§陷阱 22：改了 proxy timeout，e2e 客户端 timeout 必须同步调大**、**§陷阱 23：共享文件同步方向不能凭行数判 →「姊妹独有行 = 0」即可 cp 覆盖**、**§陷阱 24：反向查表只做最小必要的归一化 → 整体 `unquote()` 会破坏「混合编码态」**（⚠️ **2026-11-10 再更正：归一化必须「按 KB 分开」** —— `inexbot` 只换 `%26`/`%2B`，`inexbot-open` 需整体 `unquote`；套用同一条规则 → 93 条里 45 条假 miss）、**§陷阱 25：探针/审计脚本自带的「查表归一化」必须按被测对象分派，否则自己造出假回归**、基线速查 |
+| **`references/crawl-state-2026-11-10.md`** | ⭐ **本 KB 最新基线快照**（2026-11-10）：**上游零变化 → 560 持平**（连续 21 次）/ index 1,735,196 bytes（sha `922fbbb47782dfd8`，与 11-07、11-08、11-09 逐字节相同）/ **本轮 0 次网络抓取**（全部命中 raw 缓存）/ drift verdict IDENTICAL（60 页抽样 59 SAME + 1 IMG_ONLY）/ slug 契约 560/560 / 孤儿 md 0 / **真静默降级 0**（60 条：34 全文命中 + 26 命中 4000 上限）/ 引用链接 **60/60 全 200**（新增独立脚本，样本量从 12 提到 60）/ proxy 环境 5 变量三处一致 / 重载链存活 / **⭐ 修掉反查归一化「按 KB 分派」的 bug**（`inexbot-open` 的 key 是明文中文，需整体 `unquote`；旧版套用同一条规则 → 93 条里 45 条假 miss）/ **新增 2 个脚本**（`check_retrieval_chain.py` / `check_citation_links.py`）/ **补做 11-09 被 429 打断的提交**（213 行 `check_url_to_index_key.py`） |
 | **`references/crawl-state-2026-11-09.md`** | ⭐ **本 KB 最新基线快照**（2026-11-09）：**上游零变化 → 560 持平**（连续 20 次）/ index 1,735,196 bytes（与 11-07、11-08 逐字节相同）/ **本轮 0 次网络抓取**，结论来自 60 页抽样（**SAME 60 / IMG_ONLY 0**）/ slug 契约 560/560 / 孤儿 md 0 / token 级 0 不一致 / **真静默降级 0**（47 条：24 全文命中 + 23 命中 4000 上限 + 0 异常）/ 引用链接 **45/45 全 200** / proxy 环境 5 变量三处一致 / 重载链存活 / 端到端 **12/12 全 200**（**含一次 1039.8s 长尾仍 200** → 1800s timeout 至今最硬的正面证据）/ **⭐ 更正 skill 里一条错误的 URL→index-key 查表规则**（**只替换 `%26`/`%2B` = 47/47；整体 `unquote` = 1/47**）/ **补做 11-08 被 429 打断的提交**（63 行，`2652679`） |
 | **`references/crawl-state-2026-11-08.md`** | 2026-11-08 基线快照：**上游零变化 → 560 持平**（连续 19 次）/ index 1,735,196 bytes（与 11-07 逐字节相同）/ **本轮 0 次网络抓取**，结论来自 60 页抽样（59 SAME + 1 IMG_ONLY）/ slug 契约 560/560 / 孤儿 md 0 / token 级 0 不一致 / **真静默降级 0** / 端到端 **12/12 全 200**（最慢 246.4s，0 次 502）/ **⭐ 修掉 `scan_kb_topic.py` 两个真 bug**（md 路径解析 1/560→560/560；snippet 长度串行串值）/ **⭐ 「短 snippet」正确判据要比字符数不是字节数**（中文 1 字=3 字节，比字节会误判）/ **⭐ proxy 返回 url 的 `&` 是 `%26`、index key 是字面 `&` → 直接查表会误报「md not found」**（⚠️ 该规则的 `unquote` 兜底部分已于 11-09 证明是错的，见 11-09 快照）/ **11-07 的「已提交」结论第 3 次是错的**（489 行 + 2 文件没进库，429 中断） |
 | **`references/crawl-state-2026-11-07.md`** | 2026-11-07 基线快照：**上游新增 1 页 → 559 → 560**（连续 18 次持平后增长）/ index 1,735,196 bytes / 新页「双臂使用手册」（RTL25.01）7.8KB / slug 契约 560/560 / 孤儿 md 0 / token 级 0 不一致 / 短 snippet **真静默降级 0** / 引用链接 **51/51 全 200** / **⭐ 修掉 `check_reload_timer.py` 的假阳性（「age 落在 5h 附近」判据错误，约 70% 概率误报「重载链断了」）/ 上一轮「已提交」结论是错的 —— 实际有 124 行 + 1 脚本没进库（11-06 收尾被 HTTP 429 配额中断）** |
