@@ -13,8 +13,18 @@
 判定
 ----
 - HTTP 200 / 3xx  -> PASS
-- 404 / 410        -> FAIL（引用链接点不开）
+- 404 / 410        -> FAIL（引用链接打不开）
 - 连接类错误      -> WARN（网络抖动，非内容问题，不计入 FAIL）
+- **cjk 池为空**  -> FAIL（检测谓词写错；见下方「陷阱 26」）
+
+⚠️ 陷阱 26（shared-proxy-service-pitfalls.md）
+------------------------------------------------
+第一版用 `re.search(r"[一-鿿]", key)` 直接匹配 **index key** → **恒为 0**，
+因为 key 是 percent-encoded 的。脚本的兜底分支让它退化成「全库随机抽」，
+**看起来跑通了（60/60 200），但根本没测它声称要测的中文路径**。
+
+⇒ 检测中文路径必须 `unquote(k)` **先解码再匹配**；
+⇒ **池子为空就应当报错退出**，绝不能静默退化成全集（兜底分支是在「藏错」，不是「稳健」）。
 
 用法
 ----
@@ -71,10 +81,23 @@ def main():
 
     # Prefer entries with real Chinese paths -- those are the ones where
     # encoding bugs would show up.
-    # NOTE: index keys are percent-ENCODED, so a raw CJK regex on the key
-    # always yields 0 -> must decode first (detection only; the URL itself
-    # is built from the original key).
+    #
+    # ⚠️ TRAP 26 (shared-proxy-service-pitfalls.md): a detection predicate run
+    # against an ALREADY-ENCODED key always yields an empty set (the Chinese
+    # is percent-encoded, so the CJK regex never matches). Must decode FIRST.
+    # `unquote` here is for DETECTION ONLY -- the URL is still built from the
+    # original key (decoding it for the URL would double-encode -> 404).
     cjk = [k for k in keys if re.search(r"[\u4e00-\u9fff]", unquote(k))]
+
+    # ⚠️ A silently-empty pool used to fall back to the whole index, which made
+    # the script "pass" while testing the wrong thing. Fail loudly instead.
+    if not cjk:
+        print("[FAIL] cjk pool is EMPTY -- the detection predicate is wrong.")
+        print("       index keys are percent-encoded; decode before matching.")
+        print("       Refusing to fall back to random sampling over the whole")
+        print("       index (that would silently test the wrong subset).")
+        return 1
+
     pool = cjk if len(cjk) >= args.sample else keys
     random.seed(args.seed)
     if len(pool) > args.sample:

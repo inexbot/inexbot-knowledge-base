@@ -193,6 +193,22 @@ for k, v in idx.items():
 - **== 800** = 静默降级成 index 摘要 → **BUG**
 - **< 200** = 上游本来就是占位页（如伺服报错一行）→ 正常，用 md 实际字节数确认
 
+> ⚠️ **比字符数，不比字节数**（2026-11-08 实测）：中文 1 字 = **3 字节**。
+> 例：`0x0050 - 风扇故障报警（未实现）` 的 md = **71 字符 / 157 字节**，
+> proxy snippet = **71 字符** → 其实是**全文命中**；比字节（157 ≠ 71）会误判。
+> **正确判据（proxy 侧 snippet 字符数 vs md 字符数）**：
+> `== 800` → 真静默降级；`== md 字符数` → 全文命中；`< md 字符数` → 命中 4000 上限。
+>
+> ⚠️ **「反查 md」的归一化必须按 KB 分派**（2026-11-10 实测，
+> 见 `references/shared-proxy-service-pitfalls.md` §陷阱 24/25）：
+> `inexbot` 的 key 是**已 percent 编码**（只换 `%26`/`%2B`），
+> `inexbot-open` 的 key 是**明文中文**（需整体 `unquote`）。
+> 用同一条规则套两个 KB → **93 条里 45 条假 miss**，看着像 KB 回归。
+>
+> ⚠️ **筛选/检测谓词也要先解码**（§陷阱 26）：
+> 用 `re.search(r"[一-鿿]", key)` 直接匹配 index key → **恒为空集** → 兜底分支让脚本
+> 静默退化成「全库随机抽」，**看起来跑通但测错了东西**。
+
 #### ⚠️ `verify_kb.py` 的「短 snippet」note 要再判一层（2026-10-29 现场）
 
 `verify_kb.py` 会输出：
@@ -659,6 +675,35 @@ done
 > 2026-10-28 就是这么处理的 —— 姊妹 KB 的 `crawler.py` 工作树版本已含原子写，
 > 但未入库；**若它自己的 cron 不提交，下次 `git pull` 会退回非原子写版本**，
 > 那正是 proxy 重载链断裂的潜在触发点，值得在报告里点名。
+>
+> ⚠️ **例外**：`references/shared-proxy-service-pitfalls.md` 是**两个 KB 共用**的文件，
+> 本 KB 改了它就**要同步到姊妹仓库**（否则姊妹的版本会缺这条坑）。
+> 同步规则见 `references/shared-proxy-service-pitfalls.md` §陷阱 23（方向判定）
+> 与 §陷阱 27（**时序**：sync 必须在所有编辑之后，sha1 核对放最后一步）。
+
+### ⚠️ 收尾的**时序**比收尾的内容更容易出错（2026-11-10 实测）
+
+**跨 session 泄漏已复发 5 次**（10-27 / 10-28 / 10-29 / 11-06-11-07 / 11-09），
+根因从来不是「忘了做」，而是**做的顺序**：
+
+| 顺序 | 风险 |
+|---|---|
+| ❌ 「改 → 写报告 → commit → push」 | 报告太长时**很可能在 commit 之前被打断**（429 / 额度耗尽 / 工具上限）⇒ 改动泄漏 |
+| ✅ 「改 → **commit → push** → 写报告」 | 收尾动作先完成；报告里写的 commit hash **当场就是真的** |
+
+⇒ **硬规则：commit + push 放在生成报告正文之前。**
+⇒ 报告里引用 commit hash 时，那个 commit **已经推上去了**。
+
+**双仓库都要独立核验**（本 KB 一个、姊妹 KB 一个）：
+
+```bash
+for r in ~/.hermes/skills/productivity/inexbot-knowledge-base \
+         ~/.hermes/skills/productivity/inexbot-open-knowledge-base; do
+  echo "--- $r"; git -C $r status -sb | head -5; git -C $r log --oneline -2
+done
+```
+
+**共享文件的 sha1 核对要放最后** —— 同步后又编辑会再次分叉（§陷阱 27）。
 
 ## ⚠️ 结论要区分「已证实的故障」和「我怀疑的故障」
 
