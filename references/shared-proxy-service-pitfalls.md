@@ -1267,6 +1267,95 @@ E. **最后**再核对一次 sha1 —— 必须一致
 
 ---
 
+## 陷阱 30：github.com:443 不稳 → **socket 探针会「假绿」**（2026-11-12 实测，**两个 KB 都受影响**）
+
+**两个 KB 的 cron 都要往 GitHub 推 commit**，共用同一个 `github.com` 主机
+⇒ **443 挂了就是两边一起挂**。
+
+### 症状
+
+```
+fatal: unable to access 'https://github.com/inexbot/...': Failed to connect to github.com port 443 after 129573 ms: Connection timed out
+fatal: unable to access 'https://github.com/inexbot/...': Error in the HTTP2 framing layer
+```
+
+同期 `curl https://api.github.com/` 与 `curl https://open.inexbot.com/` **都返回 200**
+⇒ **不是整个 GitHub、不是 DNS、不是本机 git 配置**；
+**故障面精确到「github.com 这一台机器的 443 端口」**。
+
+### 🔴 关键：**socket 探针会「假绿」——探针通过 ≠ 真实传输可用**
+
+**这是 11-10 结论的重要修正**。11-10 的规则是「先跑 socket 探针，探针决定走哪条通道」；
+11-12 实测发现 **443 的可达性是波动的**：
+
+| 时刻 | 443 socket 探针 | 真实 `git push` |
+|---|---|---|
+| 11:04（push 前探针） | **3/3 OK**（0.23s） | ❌ **失败**：`Failed to connect ... after 129573 ms` |
+| 11:13（push 失败后复探） | **0/3 OK**（全 TimeoutError） | ❌ HTTPS 不可用 |
+| 11:13（同一时刻） | 22 **3/3 OK**（0.09s） | ✅ SSH 通道可用 |
+
+⇒ **判据必须改成「push 失败后立即复探；失败即切 SSH」**，
+**不能**因为「探针 3/3 通过」就认定 HTTPS 可用、然后停在长超时重试循环里。
+**代价量化**：11-12 那轮把 **130 秒**浪费在一次注定失败的 HTTPS push 上。
+
+### ✅ 处置流程
+
+```bash
+# 1) 短超时试一次 HTTPS（别一上来就等满 130s）
+cd <repo> && timeout 200 git -c http.version=HTTP/1.1 push origin main
+#    失败后**不要**再跑一轮长超时重试
+
+# 2) 复探通道（两个 KB 各有一份脚本）
+/usr/bin/python3 scripts/check_git_channel.py
+
+# 3) 走 SSH 传输通道（**不改动 remote 配置**）
+cd <repo> && timeout 120 git push git@github.com:owner/repo.git main:main
+
+# 4) 验证「到底入库没有」—— 不要只看 push 的返回值
+git fetch git@github.com:owner/repo.git main:refs/remotes/sshcheck/main
+git merge-base --is-ancestor <your-commit> refs/remotes/sshcheck/main && echo "IN remote"
+```
+
+> ⚠️ **不要用 `git remote set-url` 换成 SSH** —— 那是**全局副作用**，
+> 两个 KB 的 cron 共用同一份仓库配置，改了会影响对方。
+> **用 `git push <url> <refspec>` 的一次性语法**即可。
+
+### ⚠️ 副作用：HTTPS fetch 失败会让 `origin/main` 跟踪 ref 陈旧 → 误报「没推上去」
+
+```
+$ git status -sb
+## main...origin/main [ahead 1]      ← ← 误报！
+```
+
+**根因**：`origin/main` 这个**本地跟踪 ref** 只在 `git fetch` 时更新；
+HTTPS fetch 失败 → 没人更新它 → 停在**上次成功 fetch 时的旧 sha**。
+⇒ **下一轮 cron 会把「已推送」误判成「未推送」，重复劳动。**
+
+**修法**（用 SSH fetch 拿到的 sha 手工对齐）：
+
+```bash
+git fetch git@github.com:owner/repo.git main:refs/remotes/sshcheck/main
+git update-ref refs/remotes/origin/main $(git rev-parse refs/remotes/sshcheck/main)
+git status -sb          # → ## main...origin/main  ✅
+```
+
+### ⚠️ 与陷阱 15 的区分（别混判）
+
+| 错误尾部 | 含义 | 动作 |
+|---|---|---|
+| `non-fast-forward` | 🔴 历史分叉（陷阱 15） | `reset --hard` + 增量重提 |
+| `Failed to connect` / `timed out` | 🟡 通道问题（**本条**） | 短超时重试一次 → 复探 → 切 SSH |
+
+> 💡 **通则**：**push 失败 ≠ 工作没入库** —— commit 已在本地（`git log` 可见），
+> 只是没推上 remote。**必须区分这两件事**，否则会误报「未提交」而重复劳动。
+> 且 **push 成功后 HEAD 可能已经不是你的 commit**（姊妹 KB 在你 push 期间又提交了，
+> 陷阱 4 的良性竞态）⇒ 用 `merge-base --is-ancestor` 确认你的 commit **在**历史里即可。
+
+> 📌 **完整版（含复用脚本 `scripts/check_git_channel.py` 与实测数据）
+> 见 `references/git-push-channel-failures.md`。**
+
+---
+
 ## 陷阱 29：cron 里**不要用内联脚本** —— `python3 -c` 被拦 + 沙盒没有 flask（2026-11-11 实测）
 
 陷阱 7 的清单里列了 `python3 -c` 会被 policy 拦。本条补**两个新维度**，
