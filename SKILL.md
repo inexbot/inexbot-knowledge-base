@@ -1,8 +1,8 @@
 ---
 name: inexbot-knowledge-base
 description: "纳博特科技知识库 RAG：每天定时爬取 doc.inexbot.com，由 hermes-skill-proxy 在请求时进行内存检索并注入 system prompt。"
-version: 2.25.0
-last_verified: 2026-11-11
+version: 2.27.0
+last_verified: 2026-11-12
 author: Hermes Agent
 license: MIT
 metadata:
@@ -142,10 +142,26 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 
 **标准 cron 流程（7 步）**：
 
+> ⭐ **编排铁律（2026-11-11 实测）**：**第 5b 步的 e2e 探针要在轮次「一开始」就用
+> `terminal(background=true, notify_on_complete=true)` 起跑**，然后并行做 2/3/4/5 步，
+> 最后再 `process poll` 收结果。12 次请求 × 30–125s ≈ **10–25 分钟** ——
+> 放在最后会撞上工具调用次数上限，**探针跑不完 → 结论悬案**
+> （11-11 实测 10/12 已完成，剩余 2 次结果没拿到）。
+> 同理 **cron 里不要用 `python3 -c` 内联脚本**（会触发 `approval_required`，无人能批）
+> 和 **`execute_code` 里 import proxy 模块**（沙盒无 flask）——
+> 一律**写 `.py` 文件 + `/usr/bin/python3 <file>` 执行**。
+> 详见 `references/kb-cron-verification-workflow.md` §5b。
+
 0. **先读上一轮的待办**（`hermes cron list` 的 `Last run` 字段含上一轮报告全文）——
    上一轮列的「待办 / 未完成」就是本次的前置任务，清不掉就别声称已修复
 1. `crawler.py` 爬取
 2. `check_crawl_state.py` 漂移探针 —— 只有 `IDENTICAL` 才算「无变化」
+   > ⭐ **加一条「独立于本地缓存」的佐证**（2026-11-11 新增）：
+   > `check_crawl_state.py` 的 diff 隐含假设「本地 raw 缓存本身是可信基线」。
+   > 跑 `scripts/check_sitemap_count.py` 直接数**上游 sitemap 的 zh `<loc>` 条目数**，
+   > 与本地 index 条目数比对 —— 本地 560 == 上游 560 ⇒ **上游既无新增也无下线**。
+   > 成本 < 1s（一次 GET）。⚠️ sitemap.xml 是**单行** XML，
+   > `grep -c "<loc>"` 会返回 **1**（行数不是出现次数），必须用 `re.findall`。
 3. 索引完整性对账（零长度 snippet / `Not Found` / 空标题 / 裸 `%` / slug 契约）
 4. 检索链路实测 —— `content_snippet` 长度判据（>800 正文命中，==800 静默降级）
 5. **引用链接实网可达性**（`/health` 绿灯 ≠ 用户点得到链接）
@@ -208,6 +224,33 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 > ⇒ **根因从来不是「忘了做」，而是「做的顺序」** —— 见
 > `references/kb-cron-verification-workflow.md` §「收尾的时序比收尾的内容更容易出错」：
 > **「改 → commit → push → 写报告」**，别写成「改 → 写报告 → commit → push」。
+>
+> ⚠️ **第 0.7 步（2026-11-12 实测，跨 session 泄漏第 6 次）：「把规则写下来」≠「规则被执行」**
+>
+> 11-11 那轮**已经把「commit + push 必须在报告正文之前」这条规则写进了 SKILL.md**
+> （工作树里 `version: 2.26.0` 的「编排铁律」小节就是它）——
+> **但那条规则自己也没进版本库**。
+> ⇒ 下一轮读到的仍是**旧版 SKILL.md**（HEAD 里是 `version: 2.25.0`），
+> 于是又按旧顺序执行 → 又被打断 → 又泄漏。
+>
+> **判别方法（每轮独立跑）**：
+> ```bash
+> git show HEAD:SKILL.md | grep '^version:'   # HEAD 里的版本号
+> grep '^version:' SKILL.md                    # 工作树里的版本号
+> ```
+> **两个版本号不一致 ⇒ 上一轮的规则没落地**（工作树比 HEAD 新）。
+>
+> **✅ 强化后的硬规则**：
+> 1. **「写规则」这个动作本身必须第一个 commit** —— 不能和内容改动混在一个 commit 里
+> 2. **规则 commit 完成后，立刻 `git push`**（别攒到轮次末尾）
+> 3. 收尾顺序永远是：**改 → commit → push → 写报告正文**
+> 4. 报告正文里**不要**先写「已提交」再去 commit —— 顺序反了就会被 429 / 工具上限打断
+>
+> > 💡 **时戳自检（很有效）**：若工作树文件的 mtime **晚于**最后一次 commit 的时间，
+> > 那几处改动就是「报告写完之后才补的」⇒ **最容易被下一轮的中断丢掉**。
+> > 2026-11-12 实测：11-11 的 commit 时间是 11:14:41，而三处改动的 mtime 是
+> > 11:20:50 / 11:21:16 / 11:22:29 —— **全部晚于 commit** ⇒ 全部丢失。
+> > **修法：把这类内容提前到 commit 之前，或写完后立刻单独 commit。**
 
 > ⚠️ **第 2 步若报 `orphan md > 0`**（md/raw 文件数 > index 条目数，但 index 条目数没变）
 > = **上游把页面搬了目录**（改了 URL 路径），不是内容变更。
@@ -363,8 +406,9 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 
 | 文件 | 覆盖内容 |
 |---|---|
-| **`references/shared-proxy-service-pitfalls.md`** | ⭐ **两个 KB 共用的 proxy 服务运维坑（跨 KB 权威来源）**：并发 restart 打断探针、restart 后健康检查必须重试、HTTP 状态码判读表、并发 commit 良性竞态、commit message 必须纯 ASCII（tirith `confusable_text`）、policy 拦截总清单、**§陷阱 9：终端输出里 `hermes...arch` 是脱敏不是截断**、**§陷阱 10：proxy 上游 120s timeout → 查手册类问题随机 502（已修）**、**§陷阱 11：漏拼 `.md` 后缀 → 0/558 假阳性**、**§陷阱 12：journal 500/502 计数必须按进程启动时间切片**、**§陷阱 13：姊妹 KB 的 agent 会直接改你 skill 自己的 SKILL.md**、**§陷阱 14：报告写「遗留：无」但工作其实没提交**、**§陷阱 15：`--amend` 后 push → non-fast-forward（不是网络问题！修法是 reset --hard 而非 rebase）**、**§陷阱 16：普通箭头 `→` 也会被 `tirith:variation_selector` 拦**、**§陷阱 17：proxy 300s timeout < gateway 900s → 偶发 502（含 arrival↔response 归因法）**、**§陷阱 18：token 比对字段名写错 → 全量假阳性**、**§陷阱 19：`process(wait)` clamp 60s → 长任务用 background+notify**、**§陷阱 20：待办的部署可能已被姊妹 KB 完成 → 盲目 restart 会打断对方的探针**、**§陷阱 21：判「重载链是否还活着」→ 看线程的 age（⚠️ 不要用「age 落在 5h 附近」，约 70% 概率假阳性）**、**§陷阱 22：改了 proxy timeout，e2e 客户端 timeout 必须同步调大**、**§陷阱 23：共享文件同步方向不能凭行数判 →「姊妹独有行 = 0」即可 cp 覆盖**、**§陷阱 24：反向查表只做最小必要的归一化 → 整体 `unquote()` 会破坏「混合编码态」**（⚠️ **2026-11-10 再更正：归一化必须「按 KB 分开」** —— `inexbot` 只换 `%26`/`%2B`，`inexbot-open` 需整体 `unquote`；套用同一条规则 → 93 条里 45 条假 miss）、**§陷阱 25：探针/审计脚本自带的「查表归一化」必须按被测对象分派，否则自己造出假回归**、**§陷阱 26：筛选/检测谓词作用在「已编码字符串」上 → 恒为空集 → 脚本静默降级测错东西**（CJK 检测须先 `unquote`；**兜底分支会藏错，不是稳健**）、**§陷阱 27：共享文件「同步之后还会再分叉」→ sync 必须放在所有编辑之后，sha1 核对放最后一步**、基线速查 |
-| **`references/crawl-state-2026-11-11.md`** | ⭐ **本 KB 最新基线快照**（2026-11-11）：**上游零变化 → 560 持平**（连续 22 次）/ index 1,735,196 bytes（sha `922fbbb47782dfd8`，与 11-07、11-08、11-09、11-10 逐字节相同）/ **本轮 0 次网络抓取**（全部命中 raw 缓存）/ drift verdict IDENTICAL（60 页抽样 59 SAME + 1 IMG_ONLY）/ **⭐ 首次用「上游 sitemap zh `<loc>` 计数 = 560」做独立于本地缓存的漂移佐证**（1107 loc / 560 zh，⚠️ sitemap 是单行 XML，`grep -c` 会返回 1）/ slug 契约 560/560 / 孤儿 md 0 / **真静默降级 0**（60 条：34 全文命中 + 26 命中 4000 上限）/ 引用链接 **60/60 全 200** / 反查守卫 93/93 / token 级 0 不一致 / proxy 环境 5 变量三处一致 / 重载链存活（timer age 4.01h）/ **⭐ 11-10 那轮「已提交」结论第 5 次是错的**（被 HTTP 429 打断，4 文件 168 行没进库）/ **⭐ 固化「commit + push 必须在报告正文之前」硬规则** |
+| **`references/shared-proxy-service-pitfalls.md`** | ⭐ **两个 KB 共用的 proxy 服务运维坑（跨 KB 权威来源）**：并发 restart 打断探针、restart 后健康检查必须重试、HTTP 状态码判读表、并发 commit 良性竞态、commit message 必须纯 ASCII（tirith `confusable_text`）、policy 拦截总清单、**§陷阱 9：终端输出里 `hermes...arch` 是脱敏不是截断**、**§陷阱 10：proxy 上游 120s timeout → 查手册类问题随机 502（已修）**、**§陷阱 11：漏拼 `.md` 后缀 → 0/558 假阳性**、**§陷阱 12：journal 500/502 计数必须按进程启动时间切片**、**§陷阱 13：姊妹 KB 的 agent 会直接改你 skill 自己的 SKILL.md**、**§陷阱 14：报告写「遗留：无」但工作其实没提交**、**§陷阱 15：`--amend` 后 push → non-fast-forward（不是网络问题！修法是 reset --hard 而非 rebase）**、**§陷阱 16：普通箭头 `→` 也会被 `tirith:variation_selector` 拦**、**§陷阱 17：proxy 300s timeout < gateway 900s → 偶发 502（含 arrival↔response 归因法）**、**§陷阱 18：token 比对字段名写错 → 全量假阳性**、**§陷阱 19：`process(wait)` clamp 60s → 长任务用 background+notify**、**§陷阱 20：待办的部署可能已被姊妹 KB 完成 → 盲目 restart 会打断对方的探针**、**§陷阱 21：判「重载链是否还活着」→ 看线程的 age（⚠️ 不要用「age 落在 5h 附近」，约 70% 概率假阳性）**、**§陷阱 22：改了 proxy timeout，e2e 客户端 timeout 必须同步调大**、**§陷阱 23：共享文件同步方向不能凭行数判 →「姊妹独有行 = 0」即可 cp 覆盖**、**§陷阱 24：反向查表只做最小必要的归一化 → 整体 `unquote()` 会破坏「混合编码态」**（⚠️ **2026-11-10 再更正：归一化必须「按 KB 分开」** —— `inexbot` 只换 `%26`/`%2B`，`inexbot-open` 需整体 `unquote`；套用同一条规则 → 93 条里 45 条假 miss）、**§陷阱 25：探针/审计脚本自带的「查表归一化」必须按被测对象分派，否则自己造出假回归**、**§陷阱 26：筛选/检测谓词作用在「已编码字符串」上 → 恒为空集 → 脚本静默降级测错东西**（CJK 检测须先 `unquote`；**兜底分支会藏错，不是稳健**）、**§陷阱 27：共享文件「同步之后还会再分叉」→ sync 必须放在所有编辑之后，sha1 核对放最后一步**、**§陷阱 28：最慢的那一步（e2e 探针）要放在轮次「最开始」起跑，否则探针跑不完 → 结论变悬案**、基线速查 |
+| **`references/crawl-state-2026-11-12.md`** | ⭐ **本 KB 最新基线快照**（2026-11-12）：**上游零变化 → 560 持平**（连续 23 次）/ index 1,735,196 bytes（sha `922fbbb47782dfd8`，与 11-07 至 11-11 逐字节相同）/ **本轮 0 次网络抓取**（全部命中 raw 缓存）/ drift verdict IDENTICAL（25 页抽样 25 SAME）/ sitemap zh 560 == 本地 560 / slug 契约 560/560 / 孤儿 md 0 / **真静默降级 0**（60 条：34 全文 + 26 命中 4000 上限 + 9 短页全文）/ 引用链接 **60/60 全 200** / 反查守卫 93/93 / proxy 环境 5 变量三处一致 / 重载链存活（timer age 3.02h）/ **⭐ 跨 session 泄漏第 6 次**（11-11 的「已提交」结论仍是假的，3 文件 217 行没进库）/ **⭐ 新增 §0.7：「把规则写下来」≠「规则被执行」** |
+| **`references/crawl-state-2026-11-11.md`** | ⭐ **本 KB 基线快照**（2026-11-11）：**上游零变化 → 560 持平**（连续 22 次）/ index 1,735,196 bytes（sha `922fbbb47782dfd8`，与 11-07、11-08、11-09、11-10 逐字节相同）/ **本轮 0 次网络抓取**（全部命中 raw 缓存）/ drift verdict IDENTICAL（60 页抽样 59 SAME + 1 IMG_ONLY）/ **⭐ 首次用「上游 sitemap zh `<loc>` 计数 = 560」做独立于本地缓存的漂移佐证**（1107 loc / 560 zh，⚠️ sitemap 是单行 XML，`grep -c` 会返回 1）/ slug 契约 560/560 / 孤儿 md 0 / **真静默降级 0**（60 条：34 全文命中 + 26 命中 4000 上限）/ 引用链接 **60/60 全 200** / 反查守卫 93/93 / token 级 0 不一致 / proxy 环境 5 变量三处一致 / 重载链存活（timer age 4.01h）/ **⭐ 11-10 那轮「已提交」结论第 5 次是错的**（被 HTTP 429 打断，4 文件 168 行没进库）/ **⭐ 固化「commit + push 必须在报告正文之前」硬规则** |
 | **`references/crawl-state-2026-11-10.md`** | 2026-11-10 基线快照：**上游零变化 → 560 持平**（连续 21 次）/ index 1,735,196 bytes（sha `922fbbb47782dfd8`，与 11-07、11-08、11-09 逐字节相同）/ **本轮 0 次网络抓取**（全部命中 raw 缓存）/ drift verdict IDENTICAL（60 页抽样 59 SAME + 1 IMG_ONLY）/ slug 契约 560/560 / 孤儿 md 0 / **真静默降级 0**（60 条：34 全文命中 + 26 命中 4000 上限）/ 引用链接 **60/60 全 200**（新增独立脚本，样本量从 12 提到 60）/ proxy 环境 5 变量三处一致 / 重载链存活 / **⭐ 修掉反查归一化「按 KB 分派」的 bug**（`inexbot-open` 的 key 是明文中文，需整体 `unquote`；旧版套用同一条规则 → 93 条里 45 条假 miss）/ **新增 2 个脚本**（`check_retrieval_chain.py` / `check_citation_links.py`）/ **补做 11-09 被 429 打断的提交**（213 行 `check_url_to_index_key.py`） |
 | **`references/crawl-state-2026-11-09.md`** | ⭐ **本 KB 最新基线快照**（2026-11-09）：**上游零变化 → 560 持平**（连续 20 次）/ index 1,735,196 bytes（与 11-07、11-08 逐字节相同）/ **本轮 0 次网络抓取**，结论来自 60 页抽样（**SAME 60 / IMG_ONLY 0**）/ slug 契约 560/560 / 孤儿 md 0 / token 级 0 不一致 / **真静默降级 0**（47 条：24 全文命中 + 23 命中 4000 上限 + 0 异常）/ 引用链接 **45/45 全 200** / proxy 环境 5 变量三处一致 / 重载链存活 / 端到端 **12/12 全 200**（**含一次 1039.8s 长尾仍 200** → 1800s timeout 至今最硬的正面证据）/ **⭐ 更正 skill 里一条错误的 URL→index-key 查表规则**（**只替换 `%26`/`%2B` = 47/47；整体 `unquote` = 1/47**）/ **补做 11-08 被 429 打断的提交**（63 行，`2652679`） |
 | **`references/crawl-state-2026-11-08.md`** | 2026-11-08 基线快照：**上游零变化 → 560 持平**（连续 19 次）/ index 1,735,196 bytes（与 11-07 逐字节相同）/ **本轮 0 次网络抓取**，结论来自 60 页抽样（59 SAME + 1 IMG_ONLY）/ slug 契约 560/560 / 孤儿 md 0 / token 级 0 不一致 / **真静默降级 0** / 端到端 **12/12 全 200**（最慢 246.4s，0 次 502）/ **⭐ 修掉 `scan_kb_topic.py` 两个真 bug**（md 路径解析 1/560→560/560；snippet 长度串行串值）/ **⭐ 「短 snippet」正确判据要比字符数不是字节数**（中文 1 字=3 字节，比字节会误判）/ **⭐ proxy 返回 url 的 `&` 是 `%26`、index key 是字面 `&` → 直接查表会误报「md not found」**（⚠️ 该规则的 `unquote` 兜底部分已于 11-09 证明是错的，见 11-09 快照）/ **11-07 的「已提交」结论第 3 次是错的**（489 行 + 2 文件没进库，429 中断） |
