@@ -230,12 +230,23 @@ proxy journal 独立确认：本时段 **29 次** `POST /v1/chat/completions` **
 |---|---|---|
 | `inexbot-knowledge-base` | `c5905ae`（SKILL.md §0.8 + v2.28.0） | ❌ HTTPS 失败（GnuTLS -110）⇒ ✅ **SSH 通道成功** `0da8500..c5905ae main -> main` |
 | `inexbot-knowledge-base` | `5d2493e`（11-13 基线快照，194 行新增） | ✅ SSH 通道 `c5905ae..5d2493e main -> main` |
+| `inexbot-knowledge-base` | `6d7cc21`（补全快照里的 commit hash） | ✅ SSH 通道 `5d2493e..6d7cc21 main -> main` |
+| `inexbot-knowledge-base` | `a6744b4`（共享文档同步 + 结构自检脚本，4 文件 258 行） | ✅ SSH 通道 `6d7cc21..a6744b4 main -> main` |
+
+**本轮共 4 个 commit，全部已在写报告正文之前 push 完成并逐一验证在远端历史里**：
+
+| commit | 内容 |
+|---|---|
+| `c5905ae` | SKILL.md §0.8 + v2.28.0（**规则 commit，单独一个**） |
+| `5d2493e` | 11-13 基线快照 |
+| `6d7cc21` | 补全快照内的 commit hash |
+| `a6744b4` | 共享文档同步（陷阱 31 + 修孤儿块）+ 结构自检脚本 |
 
 **验证 push 真的落地**（不只看 `git status -sb`）：
 
 ```bash
 git fetch git@github.com:inexbot/inexbot-knowledge-base.git main:refs/remotes/sshcheck/main
-git merge-base --is-ancestor c5905ae refs/remotes/sshcheck/main   # -> YES
+git merge-base --is-ancestor a6744b4 refs/remotes/sshcheck/main   # -> YES
 git update-ref refs/remotes/origin/main $(git rev-parse refs/remotes/sshcheck/main)
 git status -sb                                                     # -> ## main...origin/main（无 ahead）
 ```
