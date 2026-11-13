@@ -178,7 +178,7 @@ proxy journal 独立确认：本时段 **29 次** `POST /v1/chat/completions` **
 | 仓库 | commit | push |
 |---|---|---|
 | `inexbot-knowledge-base` | `c5905ae`（SKILL.md §0.8 + v2.28.0） | ❌ HTTPS 失败（GnuTLS -110）⇒ ✅ **SSH 通道成功** `0da8500..c5905ae main -> main` |
-| `inexbot-knowledge-base` | 本轮第二个 commit（11-13 基线快照） | ✅ SSH 通道（见下） |
+| `inexbot-knowledge-base` | `5d2493e`（11-13 基线快照，194 行新增） | ✅ SSH 通道 `c5905ae..5d2493e main -> main` |
 
 **验证 push 真的落地**（不只看 `git status -sb`）：
 
