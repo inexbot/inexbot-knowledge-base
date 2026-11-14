@@ -305,6 +305,15 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 >
 > 💡 **建议把这套检查固化到每轮收尾**（成本 1 次 SSH fetch）——
 > 它比「push 的返回」更强（能证明**远端当前状态**，而非「当时返回了什么」）。
+>
+> ⭐ **本轮实测到「假 ahead」现场（11-14）**：`git push` 已返回
+> `022c3e6..2e44aae main -> main`（**成功**），但紧接着 `git status -sb` 仍显示
+> `## main...origin/main [ahead 1]` —— 因为 `refs/remotes/origin/main` 停在旧 sha。
+> ⇒ **只看 `[ahead N]` 会把「已推送成功」误判成「push 失败 → 需要重推」**，
+> 极端情况下会**重复 push 已存在的 commit**（`--amend` 后还会撞 §陷阱 15 的 non-fast-forward）。
+> ⇒ 处置：先按上面 3 条命令直查远端确认；确认已落地后
+> `git update-ref refs/remotes/origin/main $(git rev-parse refs/remotes/sshcheck/main)`
+> 把跟踪 ref 同步到远端真实 sha，`git status -sb` 即恢复无 ahead。
 
 > ⚠️ **第 2 步若报 `orphan md > 0`**（md/raw 文件数 > index 条目数，但 index 条目数没变）
 > = **上游把页面搬了目录**（改了 URL 路径），不是内容变更。

@@ -92,14 +92,16 @@
 
 | 查询 | 结果 |
 |---|---|
-| C1102 控制器 通讯接口 有哪些 | 4/4 **200** |
-| 冲压工艺 手册 参数设置 | 4/4 **200** |
-| 示教器 操作手册 功能说明 | 4/4 **200** |
+| C1102 控制器 通讯接口 有哪些 | 4/4 **200**（26.4s / 33.7s / 57.3s / 47.8s） |
+| 冲压工艺 手册 参数设置 | 4/4 **200**（89.8s / 70.5s / 61.6s / 151.5s） |
+| 示教器 操作手册 功能说明 | 4/4 **200**（90.0s / 113.0s / 78.0s / 132.5s） |
 
-**合计 12/12 全 200，0 次 502**，脚本退出码 **0**。
-proxy journal 独立确认：本时段 `POST /v1/chat/completions` **全部 200，零 5xx**。
+**合计 12/12 全 200，0 次 502**，耗时区间 **26.4s – 151.5s**，脚本退出码 **0**。
+proxy journal 独立确认：本时段 **18 次** `POST /v1/chat/completions` **全部 200，零 5xx**
+（12 本 KB + 6 姊妹 KB；姊妹探针收尾后还有 6 次到达，合计 24 次全 200）。
 
-姊妹 KB 的探针（`/tmp/e2e-2026-11-14.log`）同期**也全 200** —— 两侧同时无 502 ⇒ **本轮 gateway 链路健康**。
+姊妹 KB 的探针（`/tmp/e2e-2026-11-14.log`）同期**也 12/12 全 200**（47.1s – 144.3s）——
+两侧同时无 502 ⇒ **本轮 gateway 链路健康**。
 
 ---
 
@@ -145,8 +147,25 @@ proxy journal 独立确认：本时段 `POST /v1/chat/completions` **全部 200�
 
 | 仓库 | commit | push |
 |---|---|---|
-| `inexbot-knowledge-base` | 规则 commit（SKILL.md §0.9 + v2.29.0） | ✅ |
-| `inexbot-knowledge-base` | 11-14 基线快照 | ✅ |
+| `inexbot-knowledge-base` | `022c3e6`（SKILL.md §0.9 + v2.29.0，**规则 commit 单独一个**） | ✅ SSH 通道 `0583dfa..022c3e6 main -> main` |
+| `inexbot-knowledge-base` | `2e44aae`（11-14 基线快照，153 行新增） | ✅ SSH 通道 `022c3e6..2e44aae main -> main` |
+
+**push 落地验证（按新增的 §0.9 判据，不看 `git status -sb` 的 ahead 计数）**：
+
+```bash
+git fetch git@github.com:inexbot/inexbot-knowledge-base.git main:refs/remotes/sshcheck/main
+git merge-base --is-ancestor HEAD refs/remotes/sshcheck/main   # -> YES
+git rev-parse HEAD refs/remotes/sshcheck/main                  # -> 两者同为 2e44aae
+```
+
+> ⭐ **本轮实测到 §0.9 要防的「假 ahead」现场**：`git push` 已返回
+> `022c3e6..2e44aae main -> main`（**成功**），但紧接着 `git status -sb` 仍显示
+> `## main...origin/main [ahead 1]` —— 因为 `refs/remotes/origin/main` 跟踪 ref
+> 停在旧 sha（本地跟踪 ref 只在 HTTPS fetch 成功时才更新）。
+> ⇒ **只看 `[ahead N]` 会误判成「push 失败 → 需要重推」**。
+> 处置：`git update-ref refs/remotes/origin/main $(git rev-parse refs/remotes/sshcheck/main)`
+> 把跟踪 ref 同步到远端真实 sha，再看 `git status -sb` → 无 ahead。
+> **这就是 §0.9 把「直查远端」定为唯一可靠判据的原因。**
 
 > ⚠️ 若下一轮 `git status -sb` 又出现 `M` / `??` / `[ahead N]`，
 > 则本轮的「已提交已推送」结论同样是假的 —— 按 §0.6 / §0.7 / **§0.8** / **§0.9** 独立核对，
