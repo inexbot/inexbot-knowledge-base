@@ -1,8 +1,8 @@
 ---
 name: inexbot-knowledge-base
 description: "纳博特科技知识库 RAG：每天定时爬取 doc.inexbot.com，由 hermes-skill-proxy 在请求时进行内存检索并注入 system prompt。"
-version: 2.28.0
-last_verified: 2026-11-13
+version: 2.29.0
+last_verified: 2026-11-14
 author: Hermes Agent
 license: MIT
 metadata:
@@ -278,6 +278,34 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 > ⭐ **本轮实测（11-13）**：开局 `ahead 1`（形态 B）⇒ 直接 push，
 > 返回 `3f8efc6..0da8500 main -> main` ⇒ **一次成功，未重试**（未触发 §陷阱 30 的 130s 超时）。
 
+> ⚠️ **第 0.9 步（2026-11-14 实测）：「push 完成」的判据要用 `merge-base --is-ancestor` 直查远端**
+>
+> §0.8 的表格解决了「形态 A / B 分开判」，但**形态 B 的判据本身还有一个坑**：
+> `git status -sb` 的 `[ahead N]` 读的是**本地跟踪 ref** `refs/remotes/origin/main`，
+> 而这个 ref 只在 `git fetch` 成功时才更新。⇒ **HTTPS fetch 失败会让它停在旧 sha，
+> 于是「已推送却显示 ahead」**（见 `references/git-push-channel-failures.md`）。
+> ⇒ **`[ahead N]` 消失 ≠ push 成功；`[ahead N]` 存在 ≠ push 失败。**
+>
+> ✅ **唯一可靠的判据（1 次网络往返，不依赖 HTTPS）**：
+> ```bash
+> git fetch git@github.com:inexbot/inexbot-knowledge-base.git main:refs/remotes/sshcheck/main
+> git merge-base --is-ancestor HEAD refs/remotes/sshcheck/main && echo YES
+> git rev-parse HEAD refs/remotes/sshcheck/main
+> ```
+> 判读：
+> - `merge-base --is-ancestor` 返回 **0（YES）** ⇒ HEAD 已在远端历史里 ⇒ **push 真的落地**
+> - 两个 `rev-parse` 输出**同一个 sha** ⇒ 远端与本地完全一致（最强证据）
+> - **不依赖 HTTPS** ⇒ 绕开 §陷阱 30（github.com:443 不稳）
+>
+> ⭐ **本轮实测（11-14）**：11-13 那轮 `Last run` 带 `error: HTTP 429`（按 §0.6 其报告结论应作废），
+> 但独立复核结果是 **形态 A / B 均不存在**：工作树干净、无 ahead、
+> 且 `merge-base --is-ancestor 0583dfa refs/remotes/sshcheck/main` = **YES**、
+> `rev-parse HEAD` 与 `rev-parse refs/remotes/sshcheck/main` **同为 `0583dfa`**
+> ⇒ **11-13 的 push 真的落地了**（跨 session 泄漏链连续 2 轮被打断）。
+>
+> 💡 **建议把这套检查固化到每轮收尾**（成本 1 次 SSH fetch）——
+> 它比「push 的返回」更强（能证明**远端当前状态**，而非「当时返回了什么」）。
+
 > ⚠️ **第 2 步若报 `orphan md > 0`**（md/raw 文件数 > index 条目数，但 index 条目数没变）
 > = **上游把页面搬了目录**（改了 URL 路径），不是内容变更。
 > `crawler.py` 增量爬虫**不会**清理旧 slug → 必须补跑 `refresh_drift.py`（唯一会清孤儿的脚本），
@@ -433,6 +461,7 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 | 文件 | 覆盖内容 |
 |---|---|
 | **`references/shared-proxy-service-pitfalls.md`** | ⭐ **两个 KB 共用的 proxy 服务运维坑（跨 KB 权威来源）**：并发 restart 打断探针、restart 后健康检查必须重试、HTTP 状态码判读表、并发 commit 良性竞态、commit message 必须纯 ASCII（tirith `confusable_text`）、policy 拦截总清单、**§陷阱 9：终端输出里 `hermes...arch` 是脱敏不是截断**、**§陷阱 10：proxy 上游 120s timeout → 查手册类问题随机 502（已修）**、**§陷阱 11：漏拼 `.md` 后缀 → 0/558 假阳性**、**§陷阱 12：journal 500/502 计数必须按进程启动时间切片**、**§陷阱 13：姊妹 KB 的 agent 会直接改你 skill 自己的 SKILL.md**、**§陷阱 14：报告写「遗留：无」但工作其实没提交**、**§陷阱 15：`--amend` 后 push → non-fast-forward（不是网络问题！修法是 reset --hard 而非 rebase）**、**§陷阱 16：普通箭头 `→` 也会被 `tirith:variation_selector` 拦**、**§陷阱 17：proxy 300s timeout < gateway 900s → 偶发 502（含 arrival↔response 归因法）**、**§陷阱 18：token 比对字段名写错 → 全量假阳性**、**§陷阱 19：`process(wait)` clamp 60s → 长任务用 background+notify**、**§陷阱 20：待办的部署可能已被姊妹 KB 完成 → 盲目 restart 会打断对方的探针**、**§陷阱 21：判「重载链是否还活着」→ 看线程的 age（⚠️ 不要用「age 落在 5h 附近」，约 70% 概率假阳性）**、**§陷阱 22：改了 proxy timeout，e2e 客户端 timeout 必须同步调大**、**§陷阱 23：共享文件同步方向不能凭行数判 →「姊妹独有行 = 0」即可 cp 覆盖**、**§陷阱 24：反向查表只做最小必要的归一化 → 整体 `unquote()` 会破坏「混合编码态」**（⚠️ **2026-11-10 再更正：归一化必须「按 KB 分开」** —— `inexbot` 只换 `%26`/`%2B`，`inexbot-open` 需整体 `unquote`；套用同一条规则 → 93 条里 45 条假 miss）、**§陷阱 25：探针/审计脚本自带的「查表归一化」必须按被测对象分派，否则自己造出假回归**、**§陷阱 26：筛选/检测谓词作用在「已编码字符串」上 → 恒为空集 → 脚本静默降级测错东西**（CJK 检测须先 `unquote`；**兜底分支会藏错，不是稳健**）、**§陷阱 27：共享文件「同步之后还会再分叉」→ sync 必须放在所有编辑之后，sha1 核对放最后一步**、**§陷阱 28：最慢的那一步（e2e 探针）要放在轮次「最开始」起跑，否则探针跑不完 → 结论变悬案**、**§陷阱 29：cron 里不要用内联脚本（`python3 -c` 被拦 + 沙盒没 flask）→ 一律写 `.py` 文件 + `/usr/bin/python3`**、**§陷阱 30：github.com:443 不稳 → socket 探针会「假绿」（本轮实测命中：4 次重试全 130s 超时，浪费 520s）**、**§陷阱 31：共享文件会被并发 patch 拼坏 → 结构自检要能抓到「重复块 / 孤儿块」（2026-11-13 实测；配套脚本 `scripts/check_shared_pitfalls_structure.py`）**、基线速查 |
+| **`references/crawl-state-2026-11-14.md`** | ⭐ **本 KB 最新基线快照**（2026-11-14）：**上游零变化 → 560 持平**（连续 25 次）/ index 1,735,196 bytes（sha `922fbbb47782dfd8`，与 11-07 至 11-13 逐字节相同）/ **本轮 0 次网络抓取**（全部命中 raw 缓存）/ drift verdict IDENTICAL（25 页抽样 24 SAME + 1 IMG_ONLY）/ sitemap zh 560 == 本地 560 / slug 契约 560/560 / 孤儿 md 0 / **真静默降级 0**（60 条：34 全文 + 26 命中 4000 上限 + 9 短页全文）/ 引用链接 **60/60 全 200** / 反查守卫 93/93 / token 级 0 不一致 / proxy 环境 5 变量三处一致 / 重载链存活（timer age 1.00h）/ 端到端 **12/12 全 200**（0 次 502）/ **⭐ 短 snippet 132 条独立分类：全部是「常见问题」伺服报错占位页，404 空壳页 0** / **⭐ 新增 §0.9：「push 完成」的判据用 `merge-base --is-ancestor` 直查远端**（不再依赖陈旧的本地跟踪 ref）/ **⭐ 11-13 的 push 独立复核为「真的落地」**（跨 session 泄漏链连续 2 轮被打断） |
 | **`references/crawl-state-2026-11-13.md`** | ⭐ **本 KB 最新基线快照**（2026-11-13）：**上游零变化 → 560 持平**（连续 24 次）/ index 1,735,196 bytes（sha `922fbbb47782dfd8`，与 11-07 至 11-12 逐字节相同）/ **本轮 0 次网络抓取**（全部命中 raw 缓存）/ drift verdict IDENTICAL（25 页抽样 25 SAME）/ sitemap zh 560 == 本地 560 / slug 契约 560/560 / 孤儿 md 0 / **真静默降级 0**（60 条：34 全文 + 26 命中 4000 上限 + 9 短页全文）/ 引用链接 **60/60 全 200** / 反查守卫 93/93 / token 级 0 不一致 / proxy 环境 5 变量三处一致 / 重载链存活（timer age 2.01h）/ 端到端 **12/12 全 200**（0 次 502）/ **⭐ 短 snippet 132 条独立分类：全部是「常见问题」伺服报错占位页，404 空壳页 0** / **⭐ 新增 §0.8：「commit 完成」≠「push 完成」—— 形态 A（没进 commit）/ 形态 B（有 commit 没 push）的判别** / **⭐ 11-12 的 §0.7 规则本轮验证「确实落地」**（HEAD 版本号 == 工作树版本号） |
 | **`references/crawl-state-2026-11-12.md`** | ⭐ **本 KB 基线快照**（2026-11-12）：**上游零变化 → 560 持平**（连续 23 次）/ index 1,735,196 bytes（sha `922fbbb47782dfd8`，与 11-07 至 11-11 逐字节相同）/ **本轮 0 次网络抓取**（全部命中 raw 缓存）/ drift verdict IDENTICAL（25 页抽样 25 SAME）/ sitemap zh 560 == 本地 560 / slug 契约 560/560 / 孤儿 md 0 / **真静默降级 0**（60 条：34 全文 + 26 命中 4000 上限 + 9 短页全文）/ 引用链接 **60/60 全 200** / 反查守卫 93/93 / proxy 环境 5 变量三处一致 / 重载链存活（timer age 3.02h）/ **⭐ 跨 session 泄漏第 6 次**（11-11 的「已提交」结论仍是假的，3 文件 217 行没进库）/ **⭐ 新增 §0.7：「写规则写下来」≠「规则被执行」** |
 | **`references/crawl-state-2026-11-11.md`** | ⭐ **本 KB 基线快照**（2026-11-11）：**上游零变化 → 560 持平**（连续 22 次）/ index 1,735,196 bytes（sha `922fbbb47782dfd8`，与 11-07、11-08、11-09、11-10 逐字节相同）/ **本轮 0 次网络抓取**（全部命中 raw 缓存）/ drift verdict IDENTICAL（60 页抽样 59 SAME + 1 IMG_ONLY）/ **⭐ 首次用「上游 sitemap zh `<loc>` 计数 = 560」做独立于本地缓存的漂移佐证**（1107 loc / 560 zh，⚠️ sitemap 是单行 XML，`grep -c` 会返回 1）/ slug 契约 560/560 / 孤儿 md 0 / **真静默降级 0**（60 条：34 全文命中 + 26 命中 4000 上限）/ 引用链接 **60/60 全 200** / 反查守卫 93/93 / token 级 0 不一致 / proxy 环境 5 变量三处一致 / 重载链存活（timer age 4.01h）/ **⭐ 11-10 那轮「已提交」结论第 5 次是错的**（被 HTTP 429 打断，4 文件 168 行没进库）/ **⭐ 固化「commit + push 必须在报告正文之前」硬规则** |
