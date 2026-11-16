@@ -178,25 +178,54 @@ inexbot-open  : 磁盘 817 / 内存 817, key 集合相同 True, token 级不一�
 
 ## 6. 端到端探针（§5b）
 
-见本文件第 8 节（本轮结果）。
+按 §5b 的编排铁律，**探针在轮次「一开始」就用 `terminal(background=true, notify_on_complete=true)` 起跑**，
+然后并行做 2/3/4/5 步，最后收结果。
+
+**本 KB 结果：12/12 全 HTTP 200，0 次失败**（exit 0）。
+
+| 查询 | 4 次耗时 | 结果 |
+|---|---|---|
+| `C1102 控制器 通讯接口 有哪些` | 126.1s / 102.5s / 43.9s / 83.6s | ✅ 4/4 = 200 |
+| `冲压工艺 手册 参数设置` | 181.0s / 77.7s / 108.7s / 158.4s | ✅ 4/4 = 200 |
+| `示教器 操作手册 功能说明` | 183.6s / 121.3s / 135.7s / 70.5s | ✅ 4/4 = 200 |
+
+- 最慢 **183.6s**、最快 **43.9s**、中位约 **122s** —— 远低于 proxy 的 `HERMES_TIMEOUT=1800`
+- **0 次 502、0 次 500、0 次客户端 timeout**
+- 姊妹 KB 同时段探针（`/tmp/e2e-2026-11-16.log`）**同样 0 次 502 / 500**
+  ⇒ 两侧同时段都全绿，**没有共享链路停顿的迹象**
+
+> 📌 探针日志路径：`/tmp/e2e-inexbot-2026-11-16.log`（本 KB）
+> 与 `/tmp/e2e-2026-11-16.log`（姊妹 KB 写的）。
 
 ---
 
-## 7. git 状态（本轮收尾前）
+## 7. git 状态（本轮收尾）
 
-见第 9 节。
+| 项 | 值 |
+|---|---|
+| commit | **`39498cf`** — `docs(skill): add 2026-11-16 crawl snapshot, short-snippet classifier, token consistency check`（4 files changed, 441 insertions） |
+| 变更内容 | `SKILL.md`（版本 2.30.0 → **2.31.0**、新增 2 个脚本说明行、新增本快照表格行、页面总数连续次数 26 → 27）+ `references/crawl-state-2026-11-16.md`（新增）+ `scripts/check_short_snippet_class.py`（新增）+ `scripts/check_token_consistency.py`（新增） |
+| push | 第 1 次 **TLS 网络错误**（`GnuTLS recv error (-110)`，§陷阱 30 的 github.com:443 不稳，**不是鉴权失败**）→ 重试第 2 次成功：**`633a07c..39498cf  main -> main`** |
+| §0.9 直查远端 | `merge-base --is-ancestor HEAD refs/remotes/sshcheck/main` = **YES**；`rev-parse HEAD` 与 `rev-parse refs/remotes/sshcheck/main` **同为 `39498cf4dbd98839b5a78b2ee3bebda179147344`** ⇒ **push 真的落地** |
+| 收尾 `git status -sb` | `## main...origin/main`（**无 ahead、无 `M`、无 `??`**）⇒ 工作树干净 |
+| HEAD 版本号 vs 工作树版本号 | `2.31.0` == `2.31.0` ⇒ §0.7 检查通过 |
+
+> ⭐ **本轮收尾严格按 §0.7 的时序**：**改 → commit → push → 写报告正文**。
+> 本文件的内容在 push 之后补写（只改本 reference 文件的 e2e 段），
+> 补写后**立即单独 commit + push**（见 §7.1）。
+
+### 7.1 收尾后的第二次 commit（补写 e2e 结果）
+
+本文件 §6 的 e2e 数据是探针跑完才拿到的 ⇒ 属于「push 之后才产生的改动」。
+按 §0.7 的**时戳自检**，这类改动的 mtime 晚于最后一次 commit ⇒ **最容易被下一轮的中断丢掉**。
+⇒ 补写后**立刻单独 commit + push**，并在下一轮开局复核。
 
 ---
 
-## 8. 端到端结果
-
-（见下方 §「端到端探针」段）
-
----
-
-## 9. 待办 / 遗留
+## 8. 待办 / 遗留
 
 - **本 KB：无遗留**（工作树干净 + push 已用 §0.9 直查远端确认落地）。
 - **姊妹 KB `inexbot-open`**：工作树有 2 个未提交文件（`references/.index-snapshot.json`、
   `references/shared-proxy-service-pitfalls.md` +52 行），**由姊妹 KB 的 cron 自己补 commit + push**，
   本 KB 不越界代劳（但已确认共享文件内容与本 KB 一致，无需同步）。
+- **本轮无 proxy restart**（上游零变化 ⇒ 内存索引无需刷新；且 restart 会打断姊妹 KB 正在跑的探针）。
