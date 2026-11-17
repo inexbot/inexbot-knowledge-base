@@ -1472,6 +1472,155 @@ ps aux | grep "check_e2e_request.py" | grep -v grep   # ✅ 命中
 
 ---
 
+## 陷阱 34：自己重写 `slugify()` → 漏掉 `lstrip("/")` + `rstrip(".html")` → **全量「md 找不到」假阳性**（2026-11-16 实测，**第 6 次复发**）
+
+**这是陷阱 11 / 24 / 25 家族的**第 6 次复发**，但**失败形态是新的**：
+前几次分别是「漏拼 `.md` 后缀」（陷阱 11）、「整体 `unquote()` 破坏混合编码态」（陷阱 24）、
+「归一化没按 KB 分派」（陷阱 25）。**本轮栽在第三条上**：自己重写了 md 定位逻辑，
+却**漏掉了 crawler 调用 `slugify()` 时的两步入参约定**。
+
+### 症状（2026-11-16 现场）
+
+新写的 `scripts/check_short_snippet_class.py` 要把 `snippet<60ch: 132` 这批短条目
+逐个定位到 md 文件并判断「是不是 404 空壳页」。第一版**自己重写**了定位逻辑：
+
+```python
+# ❌ 第一版（错）：直接 unquote + "/"->"-"，漏掉了入参约定的两步
+def md_path_for(path_key):
+    base = unquote(path_key).replace("/", "-")
+    return MD / (base + ".md")
+```
+
+跑出来：**132 条全部报「md 无法定位」**，而脚本的最后一行还打印
+`=> PASS: 无空壳页；0 条短 snippet 全部是占位页` ——
+**一个自相矛盾、且看起来像「KB 大面积损坏」的假阳性**。
+
+### 根因：`slugify()` 的**调用约定**不等于 `slugify()` 的**函数体**
+
+crawler 里的实际调用是：
+
+```python
+# scripts/crawler.py:519
+slug = slugify(link.lstrip("/").rstrip(".html"))
+```
+
+而 `slugify()` 的**函数体**只做「unquote → 去非法字符 → 超长则 MD5 截断」。
+
+⇒ **`lstrip("/")` 和 `rstrip(".html")` 发生在 `slugify()` 的外面**，属于**调用方的约定**，
+**不在函数体里**。只读函数体就重写，必然漏掉这两步：
+
+| 步骤 | 在哪 | 漏掉的后果 |
+|---|---|---|
+| `lstrip("/")` | **调用方**（函数体外） | 文件名变成 `-zh-常见问题-...`，多一个前导 `-` → **全部找不到** |
+| `rstrip(".html")` | **调用方**（函数体外） | 文件名尾巴多出 `.html` → **全部找不到** |
+| `unquote` / `/`→`-` / 截断 | 函数体 | — |
+
+### ✅ 正确做法：**`importlib` 复用，不要复刻**
+
+```python
+import importlib.util, sys
+from pathlib import Path
+
+CRAWLER = Path.home() / ".hermes/skills/productivity/inexbot-knowledge-base/scripts/crawler.py"
+
+def load_slugify():
+    spec = importlib.util.spec_from_file_location("kb_crawler", str(CRAWLER))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["kb_crawler"] = mod          # ← 必须放进 sys.modules
+    spec.loader.exec_module(mod)
+    return mod.slugify                        # ← 直接拿函数，不抄逻辑
+
+slugify = load_slugify()
+p = MD / (slugify(path_key.lstrip("/").rstrip(".html")) + ".md")
+```
+
+> 💡 **注意**：即使复用了函数，**调用约定仍要照抄** ——
+> `slugify()` 自己不会帮你 `lstrip("/")`。
+> **最稳的是连调用点一起看**：`grep -n "slugify(" scripts/crawler.py`
+> ⇒ 直接看到 `slugify(link.lstrip("/").rstrip(".html"))` 这一行。
+
+### ⭐ 判据：**「全部条目找不到」+「脚本自己报了 PASS」= 脚本坏了**
+
+这次最危险的地方是脚本**同时**报了两句矛盾的话
+（132 条找不到 + 「0 条短 snippet 全部是占位页」）。
+⇒ **凡是「定位失败率 = 100%」的检查，必须先怀疑自己的定位逻辑**，
+因为**真故障几乎不可能 100% 全中**（真故障通常是**部分**条目坏）。
+
+| 现象 | 含义 |
+|---|---|
+| 定位失败 **= 100%** | 🔴 **几乎必然是脚本自己的定位逻辑错了**（不是 KB 坏） |
+| 定位失败 **= 0** | 也可能是脚本**压根没测到东西**（空集恒真，见陷阱 26） |
+| 定位失败 **= 少部分** | 才可能是真故障 |
+
+### 💡 通则：**读函数体 ≠ 知道调用约定**
+
+跨组件的隐式契约有**两层**：
+
+1. **函数体**做什么（`unquote` / 替换 / 截断）
+2. **调用方传什么**（`lstrip("/")` / `rstrip(".html")`）
+
+**只看第 1 层就重写 ⇒ 必漏第 2 层。**
+⇒ **优先「import 复用」；必须抄时，把调用点那一行也一起抄。**
+
+> 📌 与陷阱 11 的关系：陷阱 11 是「漏拼 `.md` 后缀」（函数**返回值**的语义），
+> 本条是「漏掉入参约定」（函数**调用点**的语义）——
+> **同一个家族的第 5、6 两种形态**，但修法完全一样：**别复刻，去复用**。
+> ⇒ 陷阱 25 已经写了通则「别自己复刻隐式契约」，本条补上**它长什么样**
+> （入参约定 + 100% 失败率这个指纹）。
+
+---
+
+## 陷阱 35：push 报 `GnuTLS recv error (-110)` → **也是通道问题，重试即可**（2026-11-16 实测）
+
+**这是陷阱 30 的补充** —— 陷阱 30 记录的是 socket 超时与 HTTP/2 framing 错误，
+本条是**另一种 TLS 层失败**，同样表现为「push 失败但不是鉴权失败」。
+
+### 症状（2026-11-16 现场）
+
+```
+fatal: unable to access 'https://github.com/inexbot/inexbot-knowledge-base.git/':
+GnuTLS recv error (-110): The TLS connection was non-properly terminated.
+```
+
+**处置**：**直接重试** —— 第二次即成功（`633a07c..39498cf  main -> main`）。
+
+```bash
+cd <repo> && git -c http.version=HTTP/1.1 push origin main 2>&1 | tail -3
+# 失败就再跑一次同样的命令（不要换通道、不要改 remote）
+```
+
+> ✅ **第二次成功**；随后补写的第二个 commit **第一次就成功**。
+
+### ⚠️ 判读表（把「非鉴权失败」都归到「重试即可」）
+
+| 错误尾部 | 含义 | 动作 |
+|---|---|---|
+| `GnuTLS recv error (-110)` | 🟡 **TLS 层抖动** | **重试**（本轮第 2 次成功） |
+| `Failed to connect ... port 443` / `timed out` | 🟡 通道问题（陷阱 30） | 短超时重试一次 → 复探 → 必要时切 SSH |
+| `Error in the HTTP2 framing layer` | 🟡 同上（陷阱 30） | 同上 |
+| `403` / `Authentication failed` / `could not read Password` | 🔴 **鉴权失败** | 换 token / 补 credential，**重试无用** |
+| `non-fast-forward` | 🔴 **历史分叉**（陷阱 15） | `reset --hard` + 增量重提，**重试无用** |
+
+> 💡 **通则**：**「重试一次就能好」和「重试一万次也没用」的错误必须分开**。
+> 分界线是：**网络/TLS 层 → 重试**；**鉴权/历史分叉层 → 换做法**。
+> 判别方法：**看错误尾部属于哪一类**，别看错误有多吓人。
+
+### ⚠️ 别踩「假 ahead」的坑
+
+本轮 push **成功后**紧接着 `git status -sb` 若显示 `[ahead 1]`，
+**不要**据此认定「没推上去」而重复 push（陷阱 30 的副作用段）。
+⇒ 一律用 §0.9 的直查远端判据确认：
+
+```bash
+git fetch git@github.com:inexbot/inexbot-knowledge-base.git main:refs/remotes/sshcheck/main
+git merge-base --is-ancestor HEAD refs/remotes/sshcheck/main && echo "ANCESTOR_YES"
+git rev-parse HEAD refs/remotes/sshcheck/main     # 两个 sha 相同 = 远端与本地完全一致
+```
+
+本轮实测：本地与远端 sha **同为 `29e4eba`** ⇒ **push 真的落地**。
+
+---
+
 ## 陷阱 29：cron 里**不要用内联脚本** —— `python3 -c` 被拦 + 沙盒没有 flask（2026-11-11 实测）
 
 陷阱 7 的清单里列了 `python3 -c` 会被 policy 拦。本条补**两个新维度**，
