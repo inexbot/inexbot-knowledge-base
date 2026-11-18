@@ -1725,6 +1725,55 @@ git show HEAD:references/shared-proxy-service-pitfalls.md | sha1sum
 
 ---
 
+## 陷阱 38：**push 被工具超时掐断** ≠ 成功，也 ≠ 失败 —— 只能靠 §0.9 直查远端判真伪（2026-11-17 实测）
+
+**这是陷阱 30 / 35 的第三种失败形态**：前两者是「push 返回了明确的连接错误」，
+本条是 **工具层把命令掐断了**，返回的是 `Command timed out after 60s` ——
+**既没有成功标记，也没有失败标记**。
+
+### 症状（2026-11-17 现场）
+
+```bash
+git -c http.version=HTTP/1.1 push origin main 2>&1 | tail -3
+# [Command timed out after 60s]     <- exit_code 124
+```
+
+git 可能**已经握手成功、正在传 pack**，也可能是**根本没连上** ——
+**这个返回值区分不了**。
+
+### 为什么必须用 §0.9 直查，不能凭返回值判断
+
+| 判据 | 陷阱 |
+|---|---|
+| 「返回超时 ⇒ 推送失败 ⇒ 重推」 | 可能**重复 push 同一个 commit**（本轮就是这种风险） |
+| 「返回超时 ⇒ 推送成功 ⇒ 收工」 | 可能留下**形态 B**（本地有 commit、远端没有）⇒ 下轮跨 session 泄漏 |
+| **`merge-base --is-ancestor`**（走 SSH fetch） | **唯一可靠判据** |
+
+### 正确做法：**重试循环里每轮都用 §0.9 复核**
+
+```bash
+for i in 1 2 3 4; do
+  git -c http.version=HTTP/1.1 push origin main 2>&1 | tail -2
+  if git fetch git@github.com:owner/repo.git main:refs/remotes/sshcheck/main 2>/dev/null \
+     && git merge-base --is-ancestor HEAD refs/remotes/sshcheck/main; then
+    echo "PUSH_LANDED"; break
+  fi
+  sleep 5
+done
+```
+
+本轮实测：
+- 第 1 次 push：**60s 工具超时被掐断** → §0.9 复核 = `ANCESTOR_NO`（远端仍在 `b4be2c3`）⇒ **确实要重试**
+- 重试第 1 次：**131.1s 连接超时**（陷阱 30）⇒ 复核 = `ANCESTOR_NO`
+- 重试第 2 次：**成功** `b4be2c3..724ebd0  main -> main` ⇒ 复核 = `ANCESTOR_YES`，HEAD 与远端同为 `724ebd0`
+
+> 通则：**「命令返回了超时」是一种「不知道」，不是「失败」。**
+> 任何有副作用的命令（push / 部署 / 写远端）被超时掐断后，
+> 都必须**先查远端真实状态**，再决定重不重试。
+> 盲目重试的代价是**重复副作用**；盲目收工的代价是**状态不一致**。
+
+---
+
 ## 陷阱 29：cron 里**不要用内联脚本** —— `python3 -c` 被拦 + 沙盒没有 flask（2026-11-11 实测）
 
 陷阱 7 的清单里列了 `python3 -c` 会被 policy 拦。本条补**两个新维度**，

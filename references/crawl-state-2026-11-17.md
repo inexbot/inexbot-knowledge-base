@@ -148,10 +148,24 @@ proxy PID 1954151，启动于 `2026-11-14 11:17:36`，切片统计：
 | 项 | 值 |
 |---|---|
 | 补提交（11-16 的泄漏） | **`b4be2c3`** — `docs(skill): bump to 2.32.0, add traps 34-35 (slugify convention, push TLS retry)`（2 files changed, 151 insertions） |
-| push | **一次成功**：`29e4eba..b4be2c3  main -> main`（未触发 §陷阱 30 / 35） |
-| 共享文件同步 | 姊妹 KB 侧新增 **§陷阱 36 / 37**（姊妹 agent 在你的仓库新建文件 / 收尾时姊妹改了共享文件）⇒ 本轮把姊妹版本**同步回来**（见 §5.1） |
-| 收尾 `git status -sb` | 见下方 §5.1 |
-| HEAD 版本号 vs 工作树版本号 | `2.32.0` == `2.32.0` ⇒ §0.7 检查通过 |
+| 本轮 commit | **`724ebd0`** — `docs(skill): add 2026-11-17 crawl snapshot, sync shared pitfalls traps 36-37, bump to 2.33.0`（3 files changed） |
+| push（第 1 次） | ⛔ **60s 工具超时被掐断**（`git push` 还在跑）⇒ **用 §0.9 直查远端判真伪**：`merge-base --is-ancestor` = **NO**、远端仍在 `b4be2c3` ⇒ **push 确实没落地**（不是假象） |
+| push（第 2 次，重试循环） | 第 1 次重试仍 **131.1s 连接超时**（§陷阱 30 的 github.com:443 不稳，**不是鉴权失败**）→ 第 2 次重试成功：**`b4be2c3..724ebd0  main -> main`** |
+| §0.9 直查远端 | `merge-base --is-ancestor HEAD refs/remotes/sshcheck/main` = **YES**；`rev-parse HEAD` 与 `rev-parse refs/remotes/sshcheck/main` **同为 `724ebd017e8e8b50bdb6f1af164814d7021bf2f0`** ⇒ **push 真的落地** |
+| 共享文件同步 | 姊妹 KB 侧新增 **§陷阱 36 / 37** ⇒ 本轮把姊妹版本**同步回来**（见 §5.1） |
+| 收尾 `git status -sb` | `## main...origin/main`（**无 ahead、无 `M`、无 `??`**）⇒ 工作树干净 |
+| HEAD 版本号 vs 工作树版本号 | `2.33.0` == `2.33.0` ⇒ §0.7 检查通过 |
+
+> ⭐ **本轮收尾严格按 §0.7 的时序**：**改 → commit → push → 写报告正文**。
+> 快照文件里 e2e 数据、push 细节都是探针/push 跑完后才补写的，
+> 补写后**立即单独 commit + push**（见 §7.1）。
+>
+> 💡 **新增判据（值得记住）**：**push 命令被工具超时掐断 ≠ push 成功，也 ≠ push 失败**。
+> 本轮 `git push` 在 60s 工具上限处被截断，若按「返回了超时」就判「推送失败」并盲目重推，
+> 可能重复 push 同一个 commit；反过来若按「命令跑了就算成功」就收工，
+> 则会留下「本地有 commit、远端没有」的形态 B。
+> ⇒ **唯一可靠做法就是 §0.9 的 `merge-base --is-ancestor` 直查远端**：
+> 本轮它给出 `ANCESTOR_NO`（远端仍在 `b4be2c3`）⇒ 确认要重试 ⇒ 重试第 2 次成功。
 
 ### 5.1 共享文件同步（§陷阱 27 / 37）
 
@@ -166,6 +180,35 @@ proxy PID 1954151，启动于 `2026-11-14 11:17:36`，切片统计：
 
 ⇒ 处置：把姊妹版本**单向同步回本 KB**（姊妹是超集 ⇒ 无内容丢失），
 再用 `git show HEAD:` 的 sha1 判据确认「同步后的内容不在 HEAD 里」才提交。
+
+### 7.1 补写 e2e / push 结果后的第二次 commit
+
+本文件 §4 的 e2e 数据与 §5 的 push 细节，都是探针/push 跑完后才产生的
+⇒ 属于「push 之后才产生的改动」，mtime 晚于最后一次 commit ⇒ **最容易被下一轮的中断丢掉**。
+⇒ 按 §0.7 的**时戳自检**，补写后**立刻单独 commit + push**。
+
+### 7.2 ⭐ 本轮新增判据：**push 被工具超时掐断 ≠ 成功，也 ≠ 失败**
+
+本轮第 1 次 `git push` 在 **60s 工具上限**处被掐断（返回 `Command timed out after 60s`）。
+**这个返回值既不能证明推送成功，也不能证明失败** ——
+因为 `git push` 可能已经握手成功、正在传 pack。
+
+⇒ **唯一可靠的判据仍是 §0.9**：`git fetch`（走 SSH，不受 443 影响）+
+`merge-base --is-ancestor HEAD refs/remotes/sshcheck/main`。
+
+| `merge-base --is-ancestor` | 含义 | 动作 |
+|---|---|---|
+| **YES** | push 真的落地了 | **不要重推**（否则重复 push 同一 commit） |
+| **NO** | push 确实没落地 | **重试**（配重试循环，每次用 §0.9 复核） |
+
+本轮实测：`ANCESTOR_NO`（远端停在 `b4be2c3`）⇒ 确认要重试
+⇒ 重试第 1 次 131.1s 超时、第 2 次成功（`b4be2c3..724ebd0`）
+⇒ 复核 `ANCESTOR_YES`，HEAD 与远端同为 `724ebd0`。
+
+> 💡 **推论**：`git status -sb` 的 `[ahead N]` 在这轮**同样不可信**
+> —— 它的依据是**本地跟踪 ref**，而 HTTPS fetch 失败会让它停在旧 sha。
+> **本轮实测确认了「假 ahead」**：push 已返回成功、`git status -sb` 却仍显示 ahead。
+> ⇒ **每次 push 后都用 §0.9 复核，不要用 `git status -sb` 的 ahead 计数当判据。**
 
 ---
 
