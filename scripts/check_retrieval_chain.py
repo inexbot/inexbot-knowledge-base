@@ -76,8 +76,20 @@ def load_proxy():
 
 
 def url_path_to_index_key(url):
-    """Minimal normalization -- ONLY %26 and %2B. Never a blanket unquote()."""
+    """
+    Minimal normalization -- ONLY %26 and %2B. Never a blanket unquote().
+
+    ⚠️ 2026-11-19：上游 doc.inexbot.com 改成了「.html 后缀路由」，
+    proxy 返回的 url 现在带 `.html`（普通页）或 `/index.html`（目录页）后缀，
+    而 index 的 key 是**去掉后缀**的相对路径 ⇒ 必须先剥掉后缀再查表，
+    否则 561 条全部「md not found」—— 那是探针自己的 bug，不是 KB 的问题。
+    """
     path = url.split(BASE_URL, 1)[-1] if BASE_URL in url else url
+    # 剥掉 URL 后缀（普通页 ".html" / 目录页 "/index.html"）
+    if path.endswith("/index.html"):
+        path = path[: -len("/index.html")]
+    elif path.endswith(".html"):
+        path = path[: -len(".html")]
     return path.replace("%26", "&").replace("%2B", "+")
 
 

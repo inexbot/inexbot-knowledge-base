@@ -1,8 +1,8 @@
 ---
 name: inexbot-knowledge-base
 description: "纳博特科技知识库 RAG：每天定时爬取 doc.inexbot.com，由 hermes-skill-proxy 在请求时进行内存检索并注入 system prompt。"
-version: 2.33.0
-last_verified: 2026-11-17
+version: 2.34.0
+last_verified: 2026-11-19
 author: Hermes Agent
 license: MIT
 metadata:
@@ -31,11 +31,11 @@ metadata:
 |------|-----|
 | 源站 | https://doc.inexbot.com |
 | 内容 | 纳博特控制器/示教器/工艺/通讯等技术文档 |
-| 页面总数 | **560** 篇（中文站点；2026-11-07 上游新增 1 页「双臂使用手册」（RTL25.01）→ 559 → 560；**11-18 持平，连续 29 次**；此前 558 → 559 后连续持平 17 次） |
+| 页面总数 | **561** 篇（中文站点；2026-11-19 上游新增 1 页「激光切割操作手册」（`/zh/操作手册/dev-daji/`）→ 560 → 561；**⭐ 同日上游切换为「`.html` 后缀路由」，见 §上游改「URL 形态」**） |
 | 存储路径 | `~/.hermes/kb/inexbot/` |
 | 索引文件 | `~/.hermes/kb/inexbot/index.json` |
 | Markdown | `~/.hermes/kb/inexbot/md/` |
-| 原始 HTML | `~/.hermes/kb/inexbot/raw/`（560 个，供 `rebuild_from_cache.py` 复用） |
+| 原始 HTML | `~/.hermes/kb/inexbot/raw/`（561 个，供 `rebuild_from_cache.py` 复用） |
 | 状态快照 | `~/.hermes/kb/inexbot/.crawl_state.json`（探针写的基线，用于字节级 diff） |
 | BASE_URL | `https://doc.inexbot.com` |
 
@@ -119,7 +119,7 @@ python3 ~/.hermes/skills/productivity/inexbot-knowledge-base/scripts/crawler.py 
 | `scripts/check_proxy_env.py` | **线上环境变量守卫**（2026-11-06 新增）：校验 proxy **运行进程**真正继承的 5 个环境变量 + `/etc` unit + repo 模板三处 sha12 逐项一致。**hash-only 输出**，不泄露密钥明文（避开 Hermes 输出脱敏误判）。`--units` 额外解析两份 unit |
 | `scripts/check_url_to_index_key.py` | **反向查表守卫**（2026-11-09 新增，2026-11-10 修正）：校验「proxy url → index.json key」的归一化写法没写错。⚠️ **归一化必须按 KB 分开**：`inexbot`（key 已 percent 编码）只替换 `%26`/`%2B`；`inexbot-open`（key 是明文中文）需整体 `unquote` —— 用同一条规则套两个 KB 会造成大面积假 miss（11-10 实测 93 条里 45 条查不到）。写任何「反查 md 文件」的审计脚本后都该跑它 |
 | `scripts/check_retrieval_chain.py` | **检索链路审计**（2026-11-10 新增）：按**字符数**判「真静默降级」—— proxy snippet `==800` 才是降级；`== md 字符数` 是全文命中；`< md 字符数` 是命中 4000 上限。⚠️ 必须比字符数不是字节数（中文 1 字 = 3 字节）。同时报「md 全部可定位」，**兜住审计脚本自身的查表 bug** |
-| `scripts/check_citation_links.py` | **引用链接实网可达性**（2026-11-10 新增）：按 proxy 的 `_kb_url()` 规则从 index.json 生成官方链接，对**中文路径条目**（559/560）抽样实网 GET，逐条判 200/404。`verify_kb.py` 只抽 12 条，本脚本可抽 60 条 |
+| `scripts/check_citation_links.py` | **引用链接实网可达性**（2026-11-10 新增，**2026-11-19 改**）：按 proxy 的 `_kb_url()` 规则从 index.json 生成官方链接，对**中文路径条目**（561 条里 560 条）抽样实网 GET，逐条判 200/404。`verify_kb.py` 只抽 12 条，本脚本可抽 60 条。⚠️ **2026-11-19 起链接必须带 `url_suffix`**（`.html` / `/index.html`）—— 上游改成后缀路由后裸路径全 404；脚本会**把全部 15 条目录页强制并入样本**（随机抽几乎抽不到，而它们恰是最易写错的那一类） |
 | `scripts/check_sitemap_count.py` | **上游 sitemap 条目数对账**（2026-11-11 新增）：数上游 `sitemap.xml` 里的 zh `<loc>` 个数，与本地 index 条目数比对。**独立于本地缓存**的漂移判据 —— `check_crawl_state.py` 的 diff 隐含假设「本地缓存是可信基线」，本脚本补上这个缺口（实测 1107 loc / 560 zh == 本地 560）。⚠️ sitemap 是**单行** XML，`grep -c "<loc>"` 会返回 **1**（行数不是出现次数），必须用 `re.findall` |
 | `scripts/check_short_snippet_class.py` | **短 snippet 独立分类**（2026-11-16 新增）：把 `snippet<60ch: N` 这个粗筛计数**拆成「真故障」和「正常占位页」**。判别不靠长度，靠内容：空壳页 md 前 2000 字符含 `Not Found`（或 `description == 'Not Found'`）= **真 BUG**（sitemap `&amp;` 未转义那类）；否则 = 正文本来就短的占位页。**实测 132 条全是「常见问题/伺服报错」占位页，空壳页 0**。⚠️ **md 定位必须 `importlib` 复用 `crawler.py` 的 `slugify()`**（调用约定是 `slugify(link.lstrip("/").rstrip(".html"))`）—— 自己重写漏掉 `lstrip("/")` 或 `.html` 剥离 ⇒ 全部条目「md 无法定位」的**假阳性**（本脚本初版就踩了，见 §陷阱 11 / 24） |
 | `scripts/check_token_consistency.py` | **token 级一致性检查**（2026-11-16 新增）：把 `references/proxy-runtime-freshness.md` 里的 token 级比对方法**固化成脚本**，一次覆盖两个 KB。内存侧用 `_doc_scores[kb]`（分词后的 token 集合，**不是** `_index_data`），磁盘侧字段名用 `title`/`description`/`content_snippet`（**不是** `desc`/`content`），两边用同一套 jieba 规则（`len(w) >= 2`），且先 `mod.load_all_indexes()`。**脚本会主动检测「差异数整齐等于条目数」这一取错名的指纹**（§陷阱 18） |
@@ -167,6 +167,22 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 3. 索引完整性对账（零长度 snippet / `Not Found` / 空标题 / 裸 `%` / slug 契约）
 4. 检索链路实测 —— `content_snippet` 长度判据（>800 正文命中，==800 静默降级）
 5. **引用链接实网可达性**（`/health` 绿灯 ≠ 用户点得到链接）
+   > ⚠️ **2026-11-19 新增：引用链接大面积 404 时的「三问」分诊**
+   > （本轮上游改成 `.html` 后缀路由 ⇒ 60/60 全 404，而其它检查全绿）
+   >
+   > | 现象 | 先怀疑 |
+   > |---|---|
+   > | 引用链接大面积 404，但**索引/检索全绿** | 🔴 **上游改了 URL 形态** → 跑「三形态探测」 |
+   > | 引用链接 404，且**索引完整性也挂** | 索引本身坏了 |
+   > | 漂移探针**抽样 100% HTTP404** | ⚠️ **探针自己没跟上 URL 形态** |
+   > | 反查「url → index key」大面积 miss | ⚠️ **探针自己的归一化写错了** |
+   >
+   > **三形态探测**（廉价，3 次 GET，**改任何代码前先做**）：
+   > `bare` 全 404 + `bare + ".html"` 全 200 ⇒ 上游加了 `.html` 后缀；
+   > 目录页则要 `bare + "/index.html"`。
+   > ⚠️ **务必同时确认姊妹 KB 未受影响**（11-19 实测 `open.inexbot.com` 裸路径仍 200）
+   > ⇒ **修复必须按 KB 分派**，别做成全局规则。
+   > 📌 见 `references/upstream-url-suffix-routing.md` + 共享 pitfalls §陷阱 39。
 5b. **真实端到端请求**（proxy → gateway → LLM）—— ⚠️ **唯一能抓到 timeout 类故障的检查**，
     2026-10-31 证明其他检查全绿时用户仍可能拿到 502；**同一问题连打 4 次全 200 才算过**
     > ⚠️ **2026-11-03 起：502 的归因要分层看**。proxy 的 300s timeout **短于** gateway 的
@@ -471,7 +487,9 @@ md slug 解析失败 / sitemap `&amp;` 未转义**这四类故障**完全无感*
 
 | 文件 | 覆盖内容 |
 |---|---|
-| **`references/shared-proxy-service-pitfalls.md`** | ⭐ **两个 KB 共用的 proxy 服务运维坑（跨 KB 权威来源）**：并发 restart 打断探针、restart 后健康检查必须重试、HTTP 状态码判读表、并发 commit 良性竞态、commit message 必须纯 ASCII（tirith `confusable_text`）、policy 拦截总清单、**§陷阱 9：终端输出里 `hermes...arch` 是脱敏不是截断**、**§陷阱 10：proxy 上游 120s timeout → 查手册类问题随机 502（已修）**、**§陷阱 11：漏拼 `.md` 后缀 → 0/558 假阳性**、**§陷阱 12：journal 500/502 计数必须按进程启动时间切片**、**§陷阱 13：姊妹 KB 的 agent 会直接改你 skill 自己的 SKILL.md**、**§陷阱 14：报告写「遗留：无」但工作其实没提交**、**§陷阱 15：`--amend` 后 push → non-fast-forward（不是网络问题！修法是 reset --hard 而非 rebase）**、**§陷阱 16：普通箭头 `→` 也会被 `tirith:variation_selector` 拦**、**§陷阱 17：proxy 300s timeout < gateway 900s → 偶发 502（含 arrival↔response 归因法）**、**§陷阱 18：token 比对字段名写错 → 全量假阳性**、**§陷阱 19：`process(wait)` clamp 60s → 长任务用 background+notify**、**§陷阱 20：待办的部署可能已被姊妹 KB 完成 → 盲目 restart 会打断对方的探针**、**§陷阱 21：判「重载链是否还活着」→ 看线程的 age（⚠️ 不要用「age 落在 5h 附近」，约 70% 概率假阳性）**、**§陷阱 22：改了 proxy timeout，e2e 客户端 timeout 必须同步调大**、**§陷阱 23：共享文件同步方向不能凭行数判 →「姊妹独有行 = 0」即可 cp 覆盖**、**§陷阱 24：反向查表只做最小必要的归一化 → 整体 `unquote()` 会破坏「混合编码态」**（⚠️ **2026-11-10 再更正：归一化必须「按 KB 分开」** —— `inexbot` 只换 `%26`/`%2B`，`inexbot-open` 需整体 `unquote`；套用同一条规则 → 93 条里 45 条假 miss）、**§陷阱 25：探针/审计脚本自带的「查表归一化」必须按被测对象分派，否则自己造出假回归**、**§陷阱 26：筛选/检测谓词作用在「已编码字符串」上 → 恒为空集 → 脚本静默降级测错东西**（CJK 检测须先 `unquote`；**兜底分支会藏错，不是稳健**）、**§陷阱 27：共享文件「同步之后还会再分叉」→ sync 必须放在所有编辑之后，sha1 核对放最后一步**、**§陷阱 28：最慢的那一步（e2e 探针）要放在轮次「最开始」起跑，否则探针跑不完 → 结论变悬案**、**§陷阱 29：cron 里不要用内联脚本（`python3 -c` 被拦 + 沙盒没 flask）→ 一律写 `.py` 文件 + `/usr/bin/python3`**、**§陷阱 30：github.com:443 不稳 → socket 探针会「假绿」（本轮实测命中：4 次重试全 130s 超时，浪费 520s）**、**§陷阱 31：共享文件会被并发 patch 拼坏 → 结构自检要能抓到「重复块 / 孤儿块」（2026-11-13 实测；配套脚本 `scripts/check_shared_pitfalls_structure.py`）**、**§陷阱 32：`scan_kb_topic.py` 是 AND 语义 → 多词查询给假 0 命中**、**§陷阱 33：用 `ps` 判「探针还在跑」时 grep 模式含目录会漏判**、**§陷阱 34（2026-11-16 实测，第 6 次复发）：自己重写 `slugify()` → 漏掉 `lstrip("/")` + `rstrip(".html")` 的**调用约定** → 全部条目「md 找不到」的假阳性（修法：`importlib` 复用 crawler 的 `slugify()`；判据：定位失败率 100% ⇒ 必是脚本错了，不是 KB 坏）**、**§陷阱 35（2026-11-16 实测）：push 报 `GnuTLS recv error (-110)` 也是通道问题 → 重试即可（第 2 次成功）**、**§陷阱 36（2026-11-16 实测）：姊妹 agent 会在**你的 skill 目录里新建文件** —— 你**不拥有内容**，但**拥有路径**（未跟踪文件 = 下次 `git pull` 静默回退 ⇒ 落在本仓库的路径必须由本仓库入库）**、**§陷阱 37（2026-11-16 实测）：收尾时姊妹改了共享文件 ⇒ 先比对 `git show HEAD:` 的 sha1 再决定要不要重新提交**、**§陷阱 38：push 被工具超时捏断 ≠ 成功，也 ≠ 失败 —— 只能靠 §0.9 直查远端判真伪**（2026-11-17 实测，11-18 再次命中：GnuTLS -110 ⇒ `ANCESTOR_NO` ⇒ 第 2 次成功）、基线速查 |
+| **`references/shared-proxy-service-pitfalls.md`** | ⭐ **两个 KB 共用的 proxy 服务运维坑（跨 KB 权威来源）**：并发 restart 打断探针、restart 后健康检查必须重试、HTTP 状态码判读表、并发 commit 良性竞态、commit message 必须纯 ASCII（tirith `confusable_text`）、policy 拦截总清单、**§陷阱 9：终端输出里 `hermes...arch` 是脱敏不是截断**、**§陷阱 10：proxy 上游 120s timeout → 查手册类问题随机 502（已修）**、**§陷阱 11：漏拼 `.md` 后缀 → 0/558 假阳性**、**§陷阱 12：journal 500/502 计数必须按进程启动时间切片**、**§陷阱 13：姊妹 KB 的 agent 会直接改你 skill 自己的 SKILL.md**、**§陷阱 14：报告写「遗留：无」但工作其实没提交**、**§陷阱 15：`--amend` 后 push → non-fast-forward（不是网络问题！修法是 reset --hard 而非 rebase）**、**§陷阱 16：普通箭头 `→` 也会被 `tirith:variation_selector` 拦**、**§陷阱 17：proxy 300s timeout < gateway 900s → 偶发 502（含 arrival↔response 归因法）**、**§陷阱 18：token 比对字段名写错 → 全量假阳性**、**§陷阱 19：`process(wait)` clamp 60s → 长任务用 background+notify**、**§陷阱 20：待办的部署可能已被姊妹 KB 完成 → 盲目 restart 会打断对方的探针**、**§陷阱 21：判「重载链是否还活着」→ 看线程的 age（⚠️ 不要用「age 落在 5h 附近」，约 70% 概率假阳性）**、**§陷阱 22：改了 proxy timeout，e2e 客户端 timeout 必须同步调大**、**§陷阱 23：共享文件同步方向不能凭行数判 →「姊妹独有行 = 0」即可 cp 覆盖**、**§陷阱 24：反向查表只做最小必要的归一化 → 整体 `unquote()` 会破坏「混合编码态」**（⚠️ **2026-11-10 再更正：归一化必须「按 KB 分开」** —— `inexbot` 只换 `%26`/`%2B`，`inexbot-open` 需整体 `unquote`；套用同一条规则 → 93 条里 45 条假 miss）、**§陷阱 25：探针/审计脚本自带的「查表归一化」必须按被测对象分派，否则自己造出假回归**、**§陷阱 26：筛选/检测谓词作用在「已编码字符串」上 → 恒为空集 → 脚本静默降级测错东西**（CJK 检测须先 `unquote`；**兜底分支会藏错，不是稳健**）、**§陷阱 27：共享文件「同步之后还会再分叉」→ sync 必须放在所有编辑之后，sha1 核对放最后一步**、**§陷阱 28：最慢的那一步（e2e 探针）要放在轮次「最开始」起跑，否则探针跑不完 → 结论变悬案**、**§陷阱 29：cron 里不要用内联脚本（`python3 -c` 被拦 + 沙盒没 flask）→ 一律写 `.py` 文件 + `/usr/bin/python3`**、**§陷阱 30：github.com:443 不稳 → socket 探针会「假绿」（本轮实测命中：4 次重试全 130s 超时，浪费 520s）**、**§陷阱 31：共享文件会被并发 patch 拼坏 → 结构自检要能抓到「重复块 / 孤儿块」（2026-11-13 实测；配套脚本 `scripts/check_shared_pitfalls_structure.py`）**、**§陷阱 32：`scan_kb_topic.py` 是 AND 语义 → 多词查询给假 0 命中**、**§陷阱 33：用 `ps` 判「探针还在跑」时 grep 模式含目录会漏判**、**§陷阱 34（2026-11-16 实测，第 6 次复发）：自己重写 `slugify()` → 漏掉 `lstrip("/")` + `rstrip(".html")` 的**调用约定** → 全部条目「md 找不到」的假阳性（修法：`importlib` 复用 crawler 的 `slugify()`；判据：定位失败率 100% ⇒ 必是脚本错了，不是 KB 坏）**、**§陷阱 35（2026-11-16 实测）：push 报 `GnuTLS recv error (-110)` 也是通道问题 → 重试即可（第 2 次成功）**、**§陷阱 36（2026-11-16 实测）：姊妹 agent 会在**你的 skill 目录里新建文件** —— 你**不拥有内容**，但**拥有路径**（未跟踪文件 = 下次 `git pull` 静默回退 ⇒ 落在本仓库的路径必须由本仓库入库）**、**§陷阱 37（2026-11-16 实测）：收尾时姊妹改了共享文件 ⇒ 先比对 `git show HEAD:` 的 sha1 再决定要不要重新提交**、**§陷阱 38：push 被工具超时捏断 ≠ 成功，也 ≠ 失败 —— 只能靠 §0.9 直查远端判真伪**（2026-11-17 实测，11-18 再次命中：GnuTLS -110 ⇒ `ANCESTOR_NO` ⇒ 第 2 次成功）、**§陷阱 39：上游改「URL 形态」（`.html` 后缀路由）→ 引用链接 100% 404 而表层全绿（2026-11-19 实测；含「三形态探测」判别法 + 「必须先确认姊妹 KB 未受影响」+ 6 个审计脚本的同步改法清单）**、基线速查 |
+| **`references/upstream-url-suffix-routing.md`** | ⭐ **上游改「URL 形态」（2026-11-19 新增）**：`.html` 后缀路由导致引用链接 100% 404 / 根因（index key 丢失「目录页 vs 普通页」信息）/ 判别三形态法 / sitemap 形态取判据 / 修复清单（crawler + proxy + 6 个审计脚本）/ 顺带修掉的两个假阳性（字面 ZWSP 被吞、漂移探针 100% HTTP404）/ 「先部署 + 先提交再写报告」教训 |
+| **`references/crawl-state-2026-11-19.md`** | ⭐ **本 KB 最新基线快照**（2026-11-19）：**⭐ 上游改「URL 形态」→ `.html` 后缀路由 → 引用链接 60/60 全 404 而表层全绿**（姊妹 KB `open.inexbot.com` **未受影响**，抽样 15/15 裸路径仍 200 ⇒ 修复按 KB 分派）/ 页面数 560 → **561**（新增「激光切割操作手册」`/zh/操作手册/dev-daji/`，64,851 bytes）/ sitemap zh 561 == 本地 561 / index 1,735,196 → **1,756,935 bytes**（新增 `url_suffix` 字段）/ `url_suffix` 分布 `.html` **546** / `/index.html` **15** / 引用链接修复后 **74/74 全 200** / 检索链路无静默降级 / **端到端 12/12 全 200** / **⭐ 已实施 9 个组件的修复**（crawler + proxy + 6 个审计脚本 + rebuild 的 ZWSP 假阳性）/ **⚠️ 本轮因工具上限中断：proxy 未重启、两仓库未 commit/push ⇒ 修复处于「已写盘、未上线、未入库」状态** |
 | **`references/crawl-state-2026-11-18.md`** | ⭐ **本 KB 最新基线快照**（2026-11-18）：**上游零变化 → 560 持平**（连续 29 次）/ index 1,735,196 bytes（sha `922fbbb47782dfd8`，**与 11-07 至 11-17 连续 11 天逐字节相同**）/ **本轮 0 次网络抓取**（全部命中 raw 缓存）/ drift verdict IDENTICAL（25 页抽样 **25/25 SAME**，连 IMG_ONLY 都没有）/ sitemap zh 560 == 本地 560 / slug 契约 560/560 / 孤儿 md 0 / **真静默降级 0**（反查守卫 93/93）/ 引用链接 **60/60 全 200** / token 级 0 不一致 / proxy 环境 5 变量三处一致 / 重载链存活（timer age 0.78h）/ **端到端 12/12 全 200**（0 次 502/500）/ journal 侧（按进程启动时间切片）**0×500、0×502、0×Unknown key name** / **⭐ 短 snippet 132 条独立分类：全部是「常见问题/伺服报错」占位页，404 空壳页 0** / **⭐ 跨 session 泄漏第 9 次复发（11-17 被 429 打断，其「遗留」里那 96 行没进库）→ 本轮开局已补做 commit `7eec137` + push** / **⭐ §陷阱 38（push 被工具超时掐断 ≠ 成功 ≠ 失败）在 11-18 再次适用**：第 1 次 GnuTLS -110 ⇒ §0.9 复核 `ANCESTOR_NO` ⇒ 第 2 次成功 `724ebd0..7eec137` |
 | **`references/crawl-state-2026-11-17.md`** | 2026-11-17 基线快照（2026-11-17）：**上游零变化 → 560 持平**（连续 28 次）/ index 1,735,196 bytes（sha `922fbbb47782dfd8`，**与 11-07 至 11-16 连续 10 天逐字节相同**）/ **本轮 0 次网络抓取**（全部命中 raw 缓存）/ drift verdict IDENTICAL（25 页抽样 **25/25 SAME**，连 IMG_ONLY 都没有）/ sitemap zh 560 == 本地 560 / slug 契约 560/560 / 孤儿 md 0 / **真静默降级 0**（反查守卫 93/93）/ 引用链接 **60/60 全 200** / token 级 0 不一致 / proxy 环境 5 变量三处一致 / 重载链存活（timer age 1.73h）/ **端到端 12/12 全 200**（0 次 502/500，姊妹 KB 同时段也 12/12 全 200）/ journal 侧（按进程启动时间切片）**0×500、0×502、0×Unknown key name** / **⭐ 短 snippet 132 条独立分类：全部是「常见问题/伺服报错」占位页，404 空壳页 0** / **⭐ 跨 session 泄漏第 8 次复发（11-16 收尾时补写的 151 行没进库，mtime 晚于 commit）→ 本轮开局已补做 commit `b4be2c3` + push** / **⭐ 两条长尾 462.5s / 683.0s 仍返回 200 ⇒ `HERMES_TIMEOUT=1800` 至今仍在承重** |
 | **`references/crawl-state-2026-11-16.md`** | 2026-11-16 基线快照（2026-11-16）：**上游零变化 → 560 持平**（连续 27 次）/ index 1,735,196 bytes（sha `922fbbb47782dfd8`，**与 11-07 至 11-15 连续 9 天逐字节相同**）/ **本轮 0 次网络抓取**（全部命中 raw 缓存）/ drift verdict IDENTICAL（25 页抽样 **25/25 SAME**，连 IMG_ONLY 都没有）/ sitemap zh 560 == 本地 560 / slug 契约 560/560 / 孤儿 md 0 / **真静默降级 0**（反查守卫 93/93）/ 引用链接 **60/60 全 200** / token 级 0 不一致 / proxy 环境 5 变量三处一致 / 重载链存活（timer age 2.79h）/ **端到端 12/12 全 200**（0 次 502/500，姊妹 KB 同时段也 0 次）/ **⭐ 短 snippet 132 条独立分类：全部是「常见问题/伺服报错」占位页，404 空壳页 0** / journal 侧（按进程启动时间切片）**0×500、0×502、0×Unknown key name**（8 次 404 全是外部扫描器打 `/` `/version`）/ **⭐ 本 KB 连续 2 轮无跨 session 泄漏**（HEAD 版本号 == 工作树版本号 == 2.30.0，§0.9 直查远端 sha 双方同为 `633a07c`）/ **⭐ 新增 2 个脚本**：`check_short_snippet_class.py`（短 snippet 二分类，初版踩了「自己重写 slugify」的假阳性）/ `check_token_consistency.py`（token 级一致性固化，一次覆盖两个 KB） |
@@ -582,7 +600,11 @@ doc.inexbot.com 上很多「常见问题/伺服报错」系列的页面就是 1�
 
 > **建全量索引的省时做法**：几百条同族条目的 H1 标题就是「码 - 含义」，**扫一遍标题**（一次 `glob` + 正则）就能建出完整对照表，比逐条 `read_file` 少几百次工具往返。
 >
-> **批量生成官方引用链接**：`index.json` 的 key 就是 percent-encoded URL path，value.title 是干净标题 → `"https://doc.inexbot.com" + key` 直接得到可点击链接（见 `references/large-family-kb-navigation.md` §6.2）。
+> **批量生成官方引用链接**：index.json 的 key 就是 percent-encoded URL path，value.title 是干净标题。
+> ⚠️ **2026-11-19 起不能再裸拼 `"https://doc.inexbot.com" + key`** —— 上游改成 `.html` 后缀路由后
+> 裸路径**一律 404**。正确做法：读条目的 `url_suffix` 字段（`.html` / `/index.html`）再拼，
+> 或直接用 `scripts/scan_kb_topic.py`（已内置 `official_url()`）。
+> 📌 见 `references/upstream-url-suffix-routing.md`。
 
 > **⚠️ 工具陷阱（本次实测）**：`search_files(pattern="报警|故障码", path=<md_root>, target="files")` 对中文 KB 正文返回 **total_count: 0**，而目录里明明有几百篇含"报警"的文档——该参数不匹配中文正文内容，**返回 0 不等于 KB 没有**。按内容找关键词要用 `terminal` 跑 `grep -rn`；按文件名找用 `search_files(pattern="*报警*", target="files")`（glob 走文件名，有效）。
 >
@@ -1313,6 +1335,57 @@ md 内容**逐字节相同**（纯搬家，非内容变更）。
 3. 回归确认新 URL 可达
 
 完整流程见 `references/upstream-url-migration.md`。
+
+### ⚠️⚠️ 上游改「URL 形态」（加 `.html` 后缀等）→ 引用链接 100% 404（2026-11-19 实测）
+
+> ⭐ **与上面的「页面搬家」是不同类故障。** 搬家是**路径变了**；
+> 这里是**路径没变，但路由规则变了** —— 同一个 key 的 URL 形态变了。
+> **判别标志：index 条目数不变、md/raw 数量不变、检索链路正常，
+> 但引用链接实网检查大面积 404。**
+
+**2026-11-19 现场**：`doc.inexbot.com` 从「裸路径路由」改成「`.html` 后缀路由」：
+
+| 页面类型 | 旧 | 新 |
+|---|---|---|
+| 普通页 | `/zh/xxx` → 200 | `/zh/xxx` → **404**；`/zh/xxx.html` → 200 |
+| 目录页 | `/zh/xxx/` → 200 | `/zh/xxx/` → **404**；`/zh/xxx/index.html` → 200 |
+
+⇒ **实测 60/60 引用链接全 404**（前一天还是 60/60 全 200），
+而 crawler 报 561/561 成功、`/health` 绿灯、检索链路 PASS、索引完整性全 PASS。
+**这类故障的特征就是「表层全绿但用户拿到坏链接」。**
+
+**根因**：`index.json` 的 key 是**去掉后缀**的相对路径（crawler 的正则
+`(?:/zh/.*?)(?:\.html)?/?$` 归一化而来）⇒ **「目录页 vs 普通页」的信息丢失**，
+而两者需要的后缀不同（`.html` vs `/index.html`）⇒ proxy 单靠 key 还原不出正确 URL。
+
+**✅ 修法（11-19 已实施）**：
+1. `crawler.py` 从 **sitemap 原始 URL 形态**取判据（以 `/` 结尾 = 目录页），
+   把 `url_suffix` 逐条写进 index
+2. proxy `_kb_url(base_url, path, suffix)` 支持后缀；调用方传 `item.get("url_suffix", "")`
+3. **姊妹 KB `open.inexbot.com` 未改**（实测裸路径仍 200）⇒ **修复必须按 KB 分派**，
+   绝不能做成全局规则
+
+**⚠️ 审计脚本必须同步改（6 个）**，否则会造出假回归：
+`check_citation_links.py`（+ 强制并入全部目录页）、`check_crawl_state.py`（否则 100% HTTP404，
+像是「上游全挂了」其实是探针没跟上）、`check_retrieval_chain.py`（url→key 要先剥后缀）、
+`check_url_to_index_key.py`（+ 目录页 key 要试「带/不带尾斜杠」两种）、
+`scan_kb_topic.py`、`retrieve.py`。
+
+> ⚠️ **看到「抽样 25 页 → HTTP404 100%」先怀疑探针自己，再怀疑上游。**
+
+**📌 完整诊断与修复流程见 `references/upstream-url-suffix-routing.md`。**
+
+### ⚠️ 字面零宽字符被吞 → 「ZWSP 条目数 = 全量」的假阳性（2026-11-19 再次踩到）
+
+`rebuild_from_cache.py` 里原本写 `ZWSP = ""` —— **字面 U+200B 被工具链静默吞掉**
+变成空串 ⇒ `"" in title` **恒为 True** ⇒ 报「561 条含 ZWSP」，
+而实测**真实含 U+200B 的条目 = 0**。
+
+> ✅ **一律用 `chr(0x200B)` 或显式 codepoint 构造**
+> （`"[" + "".join(chr(c) for c in (0x200B,0x200C,0x200D,0xFEFF)) + "]"`）。
+> **审计方法**：用 `ast` 扫所有脚本的 ZWSP 类常量 —— 若是 `ast.Constant` 且值 `== ""` ⇒ **BUG**；
+> 若是 `ast.Call`（`chr(...)`）⇒ 安全。11-19 实测两个 KB 的全部常量现已安全。
+
 
 > ⚠️ 排查 URL 时**别把中文 URL 直接写进 shell 命令行** —— 会被安全扫描拦下
 > （`[MEDIUM] Non-ASCII characters in URL path: ... homoglyph substitution`），

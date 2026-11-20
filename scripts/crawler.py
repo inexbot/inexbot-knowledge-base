@@ -161,11 +161,22 @@ def fetch_vitepress_metadata() -> dict:
     client.close()
 
     # 把 URL 转成相对路径（/zh/...），作为本地文件名 + 索引 key
+    #
+    # ⚠️ 2026-11-19：上游 doc.inexbot.com 改成了「.html 后缀路由」——
+    #    `/zh/xxx`（无后缀）现在一律 404，必须 `/zh/xxx.html`（普通页）
+    #    或 `/zh/xxx/index.html`（目录页）。
+    #    而 index 的 key 是**去掉后缀**的相对路径，**丢掉了「这页是目录页还是普通页」**
+    #    ⇒ proxy 单靠 key 无法还原正确 URL ⇒ 引用链接全部 404（实测 60/60）。
+    #    ⇒ 这里额外记录每个 key 的 url_suffix，随 index 一起落盘。
     rel_links = []
+    suffix_map = {}
     for u in links:
         m = re.search(r'(/zh/.*?)(?:\.html)?/?$', u)
         if m:
-            rel_links.append(m.group(1))
+            rel = m.group(1)
+            rel_links.append(rel)
+            # sitemap 原始形态是判据：以 "/" 结尾 = 目录页，否则 = 普通页
+            suffix_map[rel] = "/index.html" if u.endswith("/") else ".html"
 
     # 去重保持顺序
     seen, unique = set(), []
@@ -175,7 +186,10 @@ def fetch_vitepress_metadata() -> dict:
             unique.append(l)
 
     log(f"  最终页面列表: {len(unique)} 条")
-    return {"links": unique, "hash_map": hash_map, "html": html}
+    n_dir = sum(1 for l in unique if suffix_map.get(l) == "/index.html")
+    log(f"  URL 形态: 普通页 .html {len(unique) - n_dir} 条 / 目录页 /index.html {n_dir} 条")
+    return {"links": unique, "hash_map": hash_map, "html": html,
+            "suffix_map": suffix_map}
 
 
 # ── 第2步：提取页面正文 ───────────────────────────────────────────────────────
@@ -425,6 +439,11 @@ def build_search_index(pages: list) -> dict:
     """
     为所有页面构建轻量级搜索索引。
     每个条目包含：title, path, description, keywords, content_snippet
+
+    ⚠️ 2026-11-19：额外写入 `url_suffix`（".html" 或 "/index.html"）。
+    上游改成了 .html 后缀路由，而 index 的 key 是去掉后缀的相对路径，
+    单靠 key 还原不出正确 URL ⇒ 必须把后缀随条目一起落盘。
+    缺失时（老 index / 姊妹 KB）默认 ".html"。
     """
     log("正在构建搜索索引...")
     index = {}
@@ -448,6 +467,7 @@ def build_search_index(pages: list) -> dict:
             "content_snippet": content[:800],
             "keywords": list(word_counts.keys())[:50],  # 保留 top50 关键词
             "word_counts": word_counts,
+            "url_suffix": page.get("url_suffix", ".html"),
         }
 
     log(f"  索引构建完成，共 {len(index)} 条记录")
@@ -512,6 +532,7 @@ def crawl():
     pages = []
     failed = []
     total  = len(links)
+    suffix_map = meta.get("suffix_map", {})
 
     for i, link in enumerate(links, 1):
         # link 是相对路径（如 /zh/产品资料/控制系统/T30示教器）；拼成绝对 URL
@@ -527,6 +548,7 @@ def crawl():
                     html = f.read()
                 page_data = extract_content(html, url)
                 page_data["path"] = link
+                page_data["url_suffix"] = suffix_map.get(link, ".html")
                 pages.append(page_data)
                 log(f"  [{i}/{total}] 跳过（已存在） {link}")
                 continue
@@ -553,6 +575,7 @@ def crawl():
 
             page_data = extract_content(html, url)
             page_data["path"] = link
+            page_data["url_suffix"] = suffix_map.get(link, ".html")
 
             # 保存 Markdown
             with open(md_path, "w", encoding="utf-8") as f:

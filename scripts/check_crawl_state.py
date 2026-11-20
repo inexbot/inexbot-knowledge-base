@@ -125,6 +125,15 @@ def check_drift(idx, sample_size):
 
     def one(k):
         url = urljoin(BASE_URL, k)
+        # ⚠️ 2026-11-19：上游 doc.inexbot.com 改成了「.html 后缀路由」——
+        # 裸路径 `/zh/xxx` 现在一律 404 ⇒ 抽样若还用裸路径，会 100% 报
+        # HTTP404，看起来像「上游全挂了」，其实是探针自己没跟上 URL 形态变化。
+        # 后缀取自 index 条目的 url_suffix 字段（普通页 .html / 目录页 /index.html）。
+        suffix = idx[k].get("url_suffix", ".html") if isinstance(idx.get(k), dict) else ".html"
+        if suffix.startswith("/"):
+            url = url.rstrip("/") + suffix
+        else:
+            url = url + suffix
         s = slugify(k.lstrip("/").rstrip(".html"))
         md_p = MD_DIR / f"{s}.md"
         try:

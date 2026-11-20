@@ -103,12 +103,47 @@ def norm_path(path, kb="inexbot"):
     ⇒ 旧版脚本对两个 KB 用同一条规则 -> 45 条 `inexbot-open` 结果全部查不到，
       **看起来像 KB 回归，其实是脚本自己的查表 bug**。
     ⇒ 判别方式：**看该 KB 的 index key 里有没有 `%`**（等价于 proxy 的 `_kb_url()` 判据）。
+
+    ⚠️ 2026-11-19 追加：上游 doc.inexbot.com 改成了「.html 后缀路由」，
+    proxy 返回的 url 现在带 `.html`（普通页）/ `/index.html`（目录页）后缀，
+    而 index 的 key 是**去掉后缀**的相对路径 ⇒ **必须先剥掉后缀**再查表。
+    （open.inexbot.com 未改，裸路径仍 200 ⇒ 那边不剥。）
     """
     if kb == "inexbot":
+        # 剥掉 URL 后缀（普通页 ".html" / 目录页 "/index.html"）
+        if path.endswith("/index.html"):
+            path = path[: -len("/index.html")]
+        elif path.endswith(".html"):
+            path = path[: -len(".html")]
         # key 是已编码态：只还原被编码的 & 和 +，中文那半边的 %XX 必须原样保留
         return path.replace("%26", "&").replace("%2B", "+")
     # inexbot-open：key 是明文态，url 是整体编码态 -> 需要整体 unquote
     return unquote(path)
+
+
+def norm_key_candidates(path, kb="inexbot"):
+    """
+    返回该 url path 对应的**候选 index key 列表**。
+
+    ⚠️ 2026-11-19：目录页的 index key 与 URL 不是简单的前后缀关系。
+      - 普通页：url = key + ".html"                 -> 剥后缀即得 key
+      - 目录页：url = key.rstrip("/") + "/index.html"
+        而 crawler 的正则 `(?:/zh/.*?)(?:\\.html)?/?$` 会把结尾的 "/" 吃掉，
+        所以 **根目录页的 key 是 "/zh/"（带尾斜杠）**，而剥完 /index.html
+        只得到 "/zh"（不带尾斜杠）⇒ 直接比对必 miss。
+    ⇒ 目录页必须同时试「带尾斜杠」和「不带尾斜杠」两种形态。
+    """
+    base = norm_path(path, kb)
+    cands = [base]
+    if kb == "inexbot" and path.endswith("/index.html"):
+        # 目录页：还原尾斜杠形态
+        cands.append(base + "/")
+    # 去重保序
+    out = []
+    for c in cands:
+        if c not in out:
+            out.append(c)
+    return out
 
 
 def load_proxy():
@@ -195,10 +230,16 @@ def main(argv):
                                 "URL 中找不到 base: " + url[:100]))
                     continue
                 path = url.split(base, 1)[-1]
-                key = norm_path(path, kb)
-                if key in idx:
+                # ⚠️ 必须用 norm_key_candidates()（候选列表），不能用 norm_path()（单值）：
+                #    目录页的 url 是 key.rstrip("/") + "/index.html"，
+                #    而 crawler 的正则把结尾 "/" 吃掉 => 根目录页 key 是 "/zh/"（带尾斜杠），
+                #    剥完 /index.html 只得到 "/zh" => 直接比对必 miss。
+                #    ⇒ 目录页必须同时试「带尾斜杠」和「不带尾斜杠」两种形态。
+                cands = norm_key_candidates(path, kb)
+                hit_key = next((c for c in cands if c in idx), None)
+                if hit_key is not None:
                     keyhit += 1
-                    md = md_chars_for(P, md_root, key)
+                    md = md_chars_for(P, md_root, hit_key)
                 else:
                     md = None
                     bad.append((kb, r.get("title", "")[:40], path))

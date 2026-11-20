@@ -56,6 +56,21 @@ def md_filename(key: str) -> str:
     return _crawler_slugify(key.lstrip("/").rstrip(".html")) + ".md"
 
 
+def official_url(base_url: str, key: str, val: dict) -> str:
+    """由 index key + url_suffix 拼出可点击的官方链接。
+
+    ⚠️ 2026-11-19：上游 doc.inexbot.com 改成了「.html 后缀路由」——
+    裸路径一律 404。普通页要 ".html"，目录页要 "/index.html"。
+    open.inexbot.com 未改（裸路径仍 200）⇒ 那边不加后缀。
+    """
+    if "inexbot" not in base_url:
+        return base_url + key
+    suffix = (val or {}).get("url_suffix", ".html")
+    if suffix.startswith("/"):
+        return (base_url + key).rstrip("/") + suffix
+    return base_url + key + suffix
+
+
 def load_index(kb_name):
     base_url, root = KBs[kb_name]
     idx_path = os.path.join(root, "index.json")
@@ -82,7 +97,7 @@ def scan(kb_name: str, keyword: str):
     for key, title, desc, val in hits:
         snippet = val.get("content_snippet") or ""
         print("- %s" % title)
-        print("  url   : %s" % (base_url + key))
+        print("  url   : %s" % official_url(base_url, key, val))
         print("  key   : %s" % key)
         print("  md    : %s/md/%s" % (root, md_filename(key)))
         print("  desc  : %s" % desc[:80])
@@ -109,7 +124,7 @@ def main():
                 title = val.get("title") or ""
                 desc = val.get("description") or ""
                 if args.keyword in title or args.keyword in desc:
-                    print("[%s](%s)" % (title, base_url + key))
+                    print("[%s](%s)" % (title, official_url(base_url, key, val)))
         else:
             scan(kb, args.keyword)
 

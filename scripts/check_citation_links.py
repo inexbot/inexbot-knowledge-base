@@ -46,11 +46,25 @@ KB_ROOT = Path.home() / ".hermes/kb/inexbot"
 BASE_URL = "https://doc.inexbot.com"
 
 
-def kb_url(path):
-    """Mirror the proxy's _kb_url(): if the key already contains '%', keep it encoded."""
+def kb_url(path, suffix=""):
+    """
+    Mirror the proxy's _kb_url(): if the key already contains '%', keep it encoded.
+
+    ⚠️ 2026-11-19：上游 doc.inexbot.com 改成了「.html 后缀路由」——
+    裸路径一律 404。suffix 取自 index 条目的 url_suffix 字段：
+      ".html"       -> 普通页
+      "/index.html" -> 目录页（sitemap 原始 URL 以 "/" 结尾的那些）
+    缺失时默认 ".html"（561 条里 546 条是普通页）。
+    """
     if "%" in path:
-        return BASE_URL + quote(path, safe="/%")
-    return BASE_URL + quote(path, safe="/")
+        url = BASE_URL + quote(path, safe="/%")
+    else:
+        url = BASE_URL + quote(path, safe="/")
+    if suffix:
+        if suffix.startswith("/"):
+            return url.rstrip("/") + suffix
+        return url + suffix
+    return url
 
 
 def fetch_status(url, timeout):
@@ -105,11 +119,21 @@ def main():
     else:
         sample = pool
 
+    # ⚠️ 2026-11-19：目录页（url_suffix == "/index.html"）只有 15 条，
+    # 随机抽样几乎抽不到 —— 而它们恰恰是「后缀规则最容易写错」的那一类
+    # （.html 后缀对目录页无效，必须 /index.html）。
+    # ⇒ 强制把全部目录页并入样本，避免「普通页全绿但目录页全 404」被漏掉。
+    dir_keys = [k for k in keys if index[k].get("url_suffix") == "/index.html"]
+    if dir_keys:
+        forced = [k for k in dir_keys if k not in sample]
+        sample = sample + forced
+        print("forced-in directory pages (url_suffix=/index.html): %d" % len(forced))
+
     ok = bad = warn = 0
     failures = []
     warnings = []
     for k in sample:
-        url = kb_url(k)
+        url = kb_url(k, index[k].get("url_suffix", ".html"))
         code, err = fetch_status(url, args.timeout)
         if code == 200:
             ok += 1

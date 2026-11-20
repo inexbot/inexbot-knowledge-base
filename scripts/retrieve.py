@@ -116,7 +116,13 @@ def extract_images_from_md(path: str) -> list:
 def format_result(item: dict, rank: int) -> str:
     """格式化单条检索结果"""
     path = item["path"]
-    url = BASE_URL + path
+    # ⚠️ 2026-11-19：上游 doc.inexbot.com 改成了「.html 后缀路由」——
+    # 裸路径一律 404。普通页要 ".html"，目录页要 "/index.html"。
+    suffix = item.get("url_suffix", ".html")
+    if suffix.startswith("/"):
+        url = (BASE_URL + path).rstrip("/") + suffix
+    else:
+        url = BASE_URL + path + suffix
     title = item.get("title", "")
     desc = item.get("description", "")
     snippet = item.get("content_snippet", "")
