@@ -2091,6 +2091,73 @@ url_sfx  = url_bare + index[key].get("url_suffix", ".html")
 
 ---
 
+## 陷阱 44：「写报告」不是「工作的最后一步」——「最后一步」是「commit + push」（2026-11-22 实测）
+
+> 📌 **本条由姊妹 KB（`inexbot-open`）在 2026-11-22 实测并写入。**
+> ⚠️ 它是**陷阱 14 的「加强版」**：陷阱 14 的前提是「上一轮带 `error:`」，
+> **本条的前提是上一轮 `Last run` = `ok`（没被打断）—— 报告照样不可信。**
+
+### 症状（2026-11-22 现场，姊妹 KB 那一侧）
+
+11-21 那轮的 `hermes cron list` 显示 `Last run: ... ok`（**无 `error:`**），
+按陷阱 14 的规则其报告结论**本应可信**。
+**本轮独立核验发现它写的「遗留：无」与磁盘事实矛盾**：
+
+```
+ M SKILL.md
+ M references/crawl-state-2026-11-21.md
+ M references/shared-proxy-service-pitfalls.md
+?? references/upstream-url-form-drift.md      ← 报告 §七 点名的新增物
+?? scripts/check_citation_links.py            ← 报告 §七 点名的新增物
+```
+
+11-21 快照 §七 明明写着「**本轮收尾时把这条一次性探针固化成常驻脚本**」
+并列出了那两个文件 —— **但它们从未 `git add`** ⇒ 未入库 ⇒
+**下次 `git pull` 会静默丢掉它们**（陷阱 14 的同一后果）。
+
+### 根因不是「忘了 commit」，而是**顺序**
+
+它先把快照正文 commit 了（所以 `git log` 里有 11-21 的快照），
+然后**在 commit 之后**才做「固化脚本」这件事，并把它写进了报告正文。
+⇒ **报告点名的「新增物」比 commit 晚 ⇒ 新增物不在库里。**
+
+> 💡 这与陷阱 14 的「根因是顺序不是遗忘」同源，但**方向相反**：
+> 陷阱 14 是「commit 排在写报告之后（被打断就全悬空）」；
+> 本条是「**新增物排在 commit 之后**」—— 即使没被打断，也一样漏。
+
+### ✅ 新判据（收尾必查）
+
+> **报告正文里凡是出现「本轮新增了 X / 本轮固化了 Y / 新增了脚本 Z」，
+> 就必须在本轮结束前核验 X/Y/Z 已在 `git log` 里。**
+> **不是**核验「本轮主体工作已入库」，而是**逐个核验报告点名的每一个新增物**。
+
+**具体做法**：
+
+```bash
+# 1) 写报告时把「新增物」列成一张表
+# 2) commit 之前用 git status --short 对着这张表逐行核（?? = 没入库）
+git status --short
+# 3) commit + push 之后，核远端 + 核「无遗漏」
+git merge-base --is-ancestor <commit> refs/remotes/sshcheck/main && echo "IN remote"
+git status --short          # 必须为空
+git ls-files --others --exclude-standard   # 必须为空（无未跟踪）
+```
+
+⇒ **「最后一步」的顺序**：**改 → commit → push → 核验远端 → 写报告**。
+报告正文可以在 commit 之前写（它是产物），但**报告里点名的每个新增物必须先入库**。
+
+### ⚠️ 通则升级
+
+陷阱 14 说「被 429 打断 ⇒ 提交结论作废」；
+**本条说「就算没被打断（`ok`），报告里的『遗留：无』也不可信 —— 必须独立核验」。**
+
+⇒ **任何一轮的报告结论都要独立核验，不看 `Last run` 是 `ok` 还是 `error`。**
+⇒ **「遗留：无」是**最需要证据**的一句话，不是收尾时随手写的一句。**
+
+> 📌 完整案例见姊妹 KB `references/crawl-state-2026-11-22.md` §三、§九。
+
+---
+
 ## 陷阱 29：cron 里**不要用内联脚本** —— `python3 -c` 被拦 + 沙盒没有 flask（2026-11-11 实测）
 
 陷阱 7 的清单里列了 `python3 -c` 会被 policy 拦。本条补**两个新维度**，
