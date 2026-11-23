@@ -112,7 +112,9 @@
 
 ## 5. 端到端探针（唯一能抓到 timeout 类故障的检查）
 
-**12/12 全 200**，最慢 **93.7s**，0 次 502 / 500。
+**12/12 全 200**，最慢 **135.0s**（4×C1102：15.3/45.7/69.3/77.7s；4×冲压工艺：53.7/60.3/68.6/135.0s；
+4×示教器：60.3/75.8/76.3/84.9s），0 次 502 / 500。姊妹 KB 同轮探针也是 **10/10 全 200**（最长 118.6s）
+⇒ **共享链路健康，非单 KB 问题**。
 
 ⚠️ 本轮 **HTTPS git 通道 DEGRADED**（`:443` 2/3 OK、`:22` 3/3 OK）
 ⇒ push 走 **SSH**（与 11-22 相同结论，见 §6）。
@@ -125,12 +127,13 @@
 
 | 步骤 | 结果 |
 |---|---|
-| 提交内容 | ① `scripts/check_url_forms.py` **bug 修复**（陷阱 46）② 陷阱 46 文档 ③ SKILL.md v2.38.0→v2.39.0 + 陷阱 45/46 索引 ④ 11-22 的 3 处未入库改动 |
-| commit | 见 §7 |
-| push 通道 | **SSH**（HTTPS :443 DEGRADED，`:22` 3/3 OK） |
-| §0.9 复核 | `merge-base --is-ancestor HEAD refs/remotes/sshcheck/main` = **YES**，且 `rev-parse` 双方**同 sha** |
+| 提交内容 | ① `scripts/check_url_forms.py` **bug 修复**（陷阱 46）② 陷阱 46 文档 ③ SKILL.md v2.38.0→v2.39.0 + 陷阱 45/46 索引 ④ 11-22 的 3 处未入库改动 ⑤ 11-23 基线快照 |
+| commit | `624b999` — `fix(scripts): repair url-form probe unpacking bug; add trap 46 and 11-23 snapshot`（4 files, +619 −3） |
+| push 通道 | **SSH**（HTTPS :443 DEGRADED，`:22` 3/3 OK）—— **一次成功**：`0e9361f..624b999  main -> main` |
+| §0.9 复核 | `merge-base --is-ancestor HEAD refs/remotes/sshcheck/main` = **YES**，且 `rev-parse` 双方**同 sha `624b999`** |
 | 跟踪 ref 同步 | `git update-ref refs/remotes/origin/main` → `git status -sb` 无 ahead ✅ |
 | 新增物核验 | `git ls-files --others --exclude-standard` **为空**（§0.10 判据） |
+| 工作树 | `git status -sb` = `## main...origin/main`（**干净，无 ahead、无 M、无 ??**） |
 
 ---
 
