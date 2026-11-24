@@ -2,6 +2,11 @@
 
 2026-10-25 沉淀。适用于 `inexbot-knowledge-base` / `inexbot-open-knowledge-base` 的每日 cron。
 
+> 📌 **姊妹 KB 同源**：本文件与姊妹 skill 的
+> `inexbot-open-knowledge-base/references/kb-cron-verification-workflow.md`
+> **内容同步**（改一份要同步另一份）。姊妹侧文件名可能略有差异，
+> 若姊妹侧没有本文件，请把本文件整份复制过去。
+
 ## 核心认知
 
 **「crawler 报 558/558 成功」不是交付物，是起点。**
@@ -740,6 +745,91 @@ done
 > 本 KB 改了它就**要同步到姊妹仓库**（否则姊妹的版本会缺这条坑）。
 > 同步规则见 `references/shared-proxy-service-pitfalls.md` §陷阱 23（方向判定）
 > 与 §陷阱 27（**时序**：sync 必须在所有编辑之后，sha1 核对放最后一步）。
+
+### ⚠️ 同步**共享脚本**到姊妹 KB：不要只用「姊妹独有行 = 0」判定（2026-11-23 实测）
+
+> ⚠️ **本条补充 §陷阱 23 的判据。** §陷阱 23 说「姊妹独有行 = 0 ⇒ 可以直接 cp 覆盖」——
+> 那条对**共享文档**（`shared-proxy-service-pitfalls.md`）成立，
+> 但对**共享脚本**（两个 KB 各有一份同名 `scripts/*.py`）**会误判**。
+
+#### 现场（2026-11-23，修 `check_url_forms.py`）
+
+我方改了 `scripts/check_url_forms.py`（修一个 unpack bug），需要同步到姊妹 KB 的同名副本。
+按 §陷阱 23 跑集合差集：
+
+```
+sister-only (would be lost by cp): 7
+ours-only   (bug fix to propagate): 7
+```
+
+⇒ **sister-only = 7 ≠ 0** ⇒ 按 §陷阱 23 的字面判据，**不能 cp 覆盖**。
+
+**但那 7 行「姊妹独有行」恰恰就是需要被替换掉的 buggy 行本身**：
+
+```
+SISTER-ONLY: picked = rnd.sample(pool, min(sample_n, len(pool)))
+SISTER-ONLY: chosen = {k: v for k, v in picked}
+SISTER-ONLY: for k, v in picked:
+SISTER-ONLY: if k not in chosen:
+SISTER-ONLY: chosen[k] = v
+SISTER-ONLY: picked = list(chosen.values())
+SISTER-ONLY: print("抽样: %d 条..." % (len(picked), sample_n, forced))
+```
+
+⇒ **姊妹没有「独有内容」**，只是**内容不同**。
+
+#### ✅ 正确判据：「变化行是否全部与本次改动相关」
+
+```python
+import difflib
+hunks = [l for l in difflib.unified_diff(sister.splitlines(), ours.splitlines(), lineterm="", n=0)
+         if l.startswith(("+", "-")) and not l.startswith(("+++", "---"))]
+# 把「变化涉及的标识符」列出来
+related_tokens = ("picked", "chosen", "by_key", "picked_keys")
+unrelated = [l for l in hunks if not any(t in l for t in related_tokens)]
+if not unrelated:
+    sister_path.write_text(ours)     # 安全：全部差异都跟本次改动有关
+```
+
+| 判据 | 含义 | 动作 |
+|---|---|---|
+| `sister-only == 0` | 姊妹是**子集** | ✅ 直接 cp（§陷阱 23） |
+| 变化行**全部**与本次改动相关 | 姊妹只是**内容不同**，没有独有内容 | ✅ 可以覆盖 |
+| 存在**无关**的变化行 | 姊妹有**真正的独有内容** | ⚠️ 不能覆盖 → 手动合并 |
+
+#### 💡 通则
+
+> **「姊妹独有行 = 0」是「共享文档」的安全判据，不是「共享脚本」的。**
+> 脚本在被同步时**本来就会两边不同**（我方在修 bug，姊妹还是旧版）。
+> ⇒ 对**脚本**要用「**变化行是否全部相关**」判定；
+> 对**文档**才用「姊妹独有行 = 0」。
+>
+> ⚠️ **别把两者混用**：对脚本套 §陷阱 23 会得到「不能覆盖」的错误结论，
+> 于是 bug 修复**只留在一个 KB**，另一个 KB 继续跑着同一个坏脚本 ——
+> **而两边跑的是同一个 proxy**，等于没修。
+
+#### 同步后必须做 sha1 双向核对
+
+```bash
+sha1sum <our>/scripts/check_url_forms.py <sister>/scripts/check_url_forms.py
+# 两个 sha1 必须完全相同
+```
+
+2026-11-23 实测：同步后两侧 sha1 均为 `5041d0e938873a57d572fd4564ab66ca3e6ccfdb` ✅
+
+### ⚠️ 新脚本入库前必须**真跑一次**（2026-11-23 实测，补充 §陷阱 46）
+
+**判据不是「脚本在仓库里」，而是「脚本的**末尾判定行**出现了」。**
+
+```bash
+/usr/bin/python3 scripts/check_url_forms.py | tail -5
+# ✅ 期望：末尾出现 "VERDICT: ..." 且退出码 0
+# ❌ 若只看到头部统计行（url_suffix 分布 / 池子大小）而末尾没有 VERDICT
+#    ⇒ 脚本中途崩了（异常被顶层 except 吞掉，仍 exit 1）
+```
+
+⚠️ **头部输出正常不能证明跑通** —— 一个在 60% 处崩溃的探针会先打印一屏漂亮的统计行。
+⇒ **验收新脚本时，永远 `tail` 一下末尾的汇总/判定行。**
 
 ### ⚠️ 收尾的**时序**比收尾的内容更容易出错（2026-11-10 实测）
 

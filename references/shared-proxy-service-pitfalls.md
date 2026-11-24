@@ -2258,6 +2258,41 @@ def build_url(base, key):
 # 两个 KB 都探 ⇒ 顺便确认姊妹未受影响（陷阱 39 的前置要求）
 ```
 
+### 💡 通则（2026-11-23 补充：判据要区分「共享文档」与「共享脚本」）
+
+> ⚠️ **「姊妹独有行 = 0」是「共享文档」的安全判据，不是「共享脚本」的。**
+>
+> | 同步对象 | 判据 | 理由 |
+> |---|---|---|
+> | **共享文档**（`shared-proxy-service-pitfalls.md` 这类） | **姊妹独有行 = 0** ⇒ 可 cp | 文档是**累积**的，姊妹的独有行 = 姊妹单独写的内容 ⇒ 覆盖会丢 |
+> | **共享脚本**（两个 KB 各有一份同名 `scripts/*.py`） | **变化行是否全部与本次改动相关** ⇒ 才可覆盖 | 脚本**本来就会两边不同**（我在修 bug、姊妹还是旧版）⇒ 「独有行 ≠ 0」是**常态**，不代表姊妹有独有内容 |
+>
+> **2026-11-23 现场**（修 `check_url_forms.py` 的 unpack bug 并同步）：
+> ```
+> sister-only (would be lost by cp): 7
+> ours-only   (bug fix to propagate): 7
+> ```
+> 那 7 行「姊妹独有行」**恰恰就是要被替换掉的 buggy 行本身**
+> （`picked = rnd.sample(...)` / `chosen = {k: v for k, v in picked}` / `for k, v in picked:` …）
+> ⇒ **姊妹没有独有内容，只是内容不同。**
+>
+> ✅ **正确做法**（脚本同步）：
+> ```python
+> hunks = [l for l in difflib.unified_diff(sister.splitlines(), ours.splitlines(), lineterm="", n=0)
+>          if l.startswith(("+","-")) and not l.startswith(("+++","---"))]
+> unrelated = [l for l in hunks if not any(t in l for t in related_tokens)]
+> if not unrelated:            # 全部差异都跟本次改动有关 → 安全覆盖
+>     sister_path.write_text(ours)
+> ```
+> ⇒ **存在无关的变化行 ⇒ 不能覆盖**，手动合并。
+>
+> ⚠️ **别把两者混用**：对脚本套「姊妹独有行 = 0」会得到「不能覆盖」的错误结论，
+> 于是 **bug 修复只留在一个 KB，另一个 KB 继续跑同一个坏脚本** ——
+> 而**两边跑的是同一个 proxy**，等于没修。
+>
+> 📌 同步后**必须** `sha1sum` 双向核对（两侧 sha1 必须完全相同）。
+> 2026-11-23 实测：同步后两侧 sha1 均为 `5041d0e938873a57d572fd4564ab66ca3e6ccfdb` ✅
+
 ---
 
 ## 陷阱 46：**「固化脚本」入库前没真跑过一次** ⇒ 下一个 cron 轮次才发现它崩（2026-11-23 实测）
