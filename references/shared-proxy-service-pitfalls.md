@@ -2199,7 +2199,36 @@ git merge-base --is-ancestor <commit> refs/remotes/sshcheck/main && echo "IN rem
 > ⇒ 实际报告自己点名的 2 个新增物都没入库。
 > **⇒ 看到 commit 在 ≠ 看到所有新增物在。**
 
-> 📌 完整案例见姊妹 KB `references/crawl-state-2026-11-22.md` §三、§九。
+> #### 🔴 补充：**本库连续三轮复现 ⇒ 「记住要 commit」不可能根治**（2026-11-24 实测）
+>
+> | 轮次 | 未入库处数 | 上一轮 `Last run` | 是否被它自己报告点名 |
+> |---|---|---|---|
+> | 11-21 | 5 | `ok` | ✅ 是（含 2 个 `??` 新增物） |
+> | 11-22 | 2 | `ok` | ✅ 是 |
+> | 11-23 | 4 | `ok` | ✅ 是（含 `?? crawl-state-2026-11-23-skill-updates.md`） |
+>
+> ⇒ **三轮的 `Last run` 全是 `ok`**（**没有 `error:`、没有超时、没有任何信号**），
+> **且每一轮「没入库的东西」恰好就是那一轮自己报告里点名的「新增物」**。
+> ⇒ **这不是偶发失误，是「写报告」排在「commit + push」之后的结构性缺陷。**
+>
+> **⇒ 结论（比「记得做」强得多）**：
+> **凡是需要「下一轮生效」的东西，必须在 commit 之前 `git add`；
+> 收尾必须机械地跑一遍核验清单，而不是依赖「我记得」。**
+>
+> ```bash
+> # 顺序铁律：改 → add → commit → push → 核验远端 → 写报告
+> git add -A && git commit -m "<ascii only>"
+> git push origin main
+> git merge-base --is-ancestor <commit> refs/remotes/sshcheck/main && echo "IN remote"
+> git status --short && git ls-files --others --exclude-standard   # 两者都必须为空
+> ```
+>
+> ⚠️ **「新增物」要单独 `git add`（不要只 `git add -u`）** ——
+> `git add -u` **不新增未跟踪文件** ⇒ 报告点名的 `??` 新增物会被漏掉。
+> ⇒ **一律用 `git add -A`**（或显式列出新增物路径）。
+>
+> 📌 完整案例见姊妹 KB `references/crawl-state-2026-11-22.md` §三、§九；
+> 本库三轮案例见 `references/crawl-state-2026-11-24.md` §三。
 
 ---
 
