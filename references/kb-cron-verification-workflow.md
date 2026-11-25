@@ -831,6 +831,108 @@ sha1sum <our>/scripts/check_url_forms.py <sister>/scripts/check_url_forms.py
 ⚠️ **头部输出正常不能证明跑通** —— 一个在 60% 处崩溃的探针会先打印一屏漂亮的统计行。
 ⇒ **验收新脚本时，永远 `tail` 一下末尾的汇总/判定行。**
 
+#### ⚠️⚠️ **「新增物」必须用 `git add -A`，不能用 `git add -u`**（2026-11-24 实测）
+
+> 📌 姊妹 KB 侧在 2026-11-24 独立复盘了**连续三轮**（11-21: 5 处 / 11-22: 2 处 / 11-23: 4 处）
+> 的同一形态泄漏，得出一个比「记得做」更强的结论。
+
+| 轮次 | 未入库处数 | 上一轮 `Last run` | 是否被它自己报告点名 |
+|---|---|---|---|
+| 11-21 | 5 | `ok` | ✅ 是（含 2 个 `??` 新增物） |
+| 11-22 | 2 | `ok` | ✅ 是 |
+| 11-23 | 4 | `ok` | ✅ 是（含 `?? crawl-state-2026-11-23-skill-updates.md`） |
+
+⇒ **三轮的 `Last run` 全是 `ok`**（**没有 `error:`、没有超时、没有任何信号**），
+且**每一轮「没入库的东西」恰好就是那一轮自己报告里点名的「新增物」**。
+⇒ **这不是偶发失误，是「写报告」排在「commit + push」之后的结构性缺陷。**
+
+**⚠️ 最容易踩的具体那一步**：
+
+> **`git add -u` 不新增未跟踪文件。**
+> ⇒ 报告点名的 `??` 新增物（新建的脚本 / 快照）会被**静默漏掉** ——
+> `git add -u` 只 stage 已跟踪文件的修改，**新建的 `??` 文件根本不在暂存区**。
+> ⇒ **一律用 `git add -A`**，或**显式列出新增物路径**。
+
+```bash
+# ✅ 正确：一条命令把「修改 + 新增」都带上
+git add -A && git commit -m "<ascii only>"
+
+# ❌ 危险：漏掉报告点名的 ?? 新增物
+git add -u && git commit -m "..."     # 新建的脚本/快照不在暂存区！
+```
+
+**⇒ 结论（比「记得做」强得多）**：
+**凡是需要「下一轮生效」的东西，必须在 commit 之前 `git add`；
+收尾必须机械地跑一遍核验清单，而不是依赖「我记得」。**
+
+```bash
+# 顺序铁律：改 → add → commit → push → 核验远端 → 写报告
+git add -A && git commit -m "<ascii only>"
+git push origin main
+git merge-base --is-ancestor <commit> refs/remotes/sshcheck/main && echo "IN remote"
+git status --short && git ls-files --others --exclude-standard   # 两者都必须为空
+```
+
+> 💡 **推论**：cron 的产出**不是报告**，而是**「仓库里多了一次提交」**。
+> 报告只是产物；**仓库状态才是交付物**。
+
+### ⚠️ 共享文档同步的最简判据：**两侧 `HEAD` blob 相同 ⇒ 直接 `git apply` 前向 diff**（2026-11-24 实测）
+
+**这是 §陷阱 23 / 45（集合差集判据）之外的第三条路，且是本轮实测最省事的一条。**
+
+**场景**：两个 KB 各有一个 repo，共同维护 `references/shared-proxy-service-pitfalls.md`。
+本轮需要把姊妹的改动同步过来。
+
+**判据（比集合差集更快、更安全）**：
+
+```bash
+# ① 比两侧 HEAD blob —— 只需 2 次本地 git 调用，零网络
+git -C <our_repo>   rev-parse HEAD:references/shared-proxy-service-pitfalls.md
+git -C <sis_repo>   rev-parse HEAD:references/shared-proxy-service-pitfalls.md
+```
+
+**若两侧输出的 sha 相同** ⇒ 姊妹的工作树是**同基线的干净前向 diff**
+⇒ **导出 + apply 即可，零手工合并、零冲突**：
+
+```bash
+# ② 在姊妹 repo 里导出「从共同基线到当前工作树」的 diff
+cd <sis_repo>
+git diff <common_blob> -- references/shared-proxy-service-pitfalls.md > /tmp/sister-shared.patch
+
+# ③ 在本 repo 里 apply（先 --check 再真 apply）
+cd <our_repo>
+git apply --check /tmp/sister-shared.patch && echo "APPLY_CHECK: OK"
+git apply /tmp/sister-shared.patch
+```
+
+2026-11-24 实测：两侧 `HEAD` blob 同为 `0341e8d` ⇒ `git apply --check` 通过 ⇒
+`git apply` **一次成功、零冲突**（姊妹独有 46 行）。姊妹随后又提交了新块 ⇒
+**再跑一次同一套流程**（新基线 blob `c713f68`）⇒ 又是**一次成功、零冲突**。
+
+**⇒ 同步后必须做 sha1 双向核对**（陷阱 37 的三问之三）：
+
+```bash
+sha1sum <our>/references/shared-proxy-service-pitfalls.md \
+        <sis>/references/shared-proxy-service-pitfalls.md
+# 两个 sha1 必须完全相同
+```
+
+**⚠️ 什么时候不能用这条路**：
+
+| 情况 | 该用哪条 |
+|---|---|
+| 两侧 `HEAD` blob **相同** | ⭐ **本条**：`git diff` + `git apply`（最快，零手工合并） |
+| 两侧 `HEAD` blob **不同** | 退回 §陷阱 23 / 45 的**集合差集 / 变化行相关性**判据 |
+| 同步的是**共享脚本**（同名 `scripts/*.py`） | 用「变化行是否全部与本次改动相关」判据（陷阱 45） |
+
+> 💡 **通则**：**共享文件的同步，优先找「共同基线」** ——
+> git 天生就是内容寻址的，**两侧 `HEAD` blob 相同 = 有共同祖先 commit = 可以用 diff 直接搬**。
+> 比逐行集合比对更快、也更不容易漏。
+>
+> ⚠️ 但**「有共同基线」不等于「可以直接覆盖我方」** ——
+> 姊妹的工作树只有**它自己那一侧的新增**，我方的独立改动不在 diff 里。
+> ⇒ **必须用 `git apply`（增量），不要用 `cp`（覆盖）。**
+
 ### ⚠️ 收尾的**时序**比收尾的内容更容易出错（2026-11-10 实测）
 
 **跨 session 泄漏已复发 5 次**（10-27 / 10-28 / 10-29 / 11-06-11-07 / 11-09），
