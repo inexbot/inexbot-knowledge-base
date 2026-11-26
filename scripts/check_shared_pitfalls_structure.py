@@ -38,7 +38,10 @@
    4. `INTERLEAVED_BODY`   两节正文**逐行交错**（按重叠比例判定，天然容忍
       「一两句在多节重复」的正常写法）
    5. `SUSPECT_ORPHAN`      子标题数远多于 section 数（正文有、标题丢了）
-判据阈值见下方常量，均已在合成样本上实测过（见本文件末尾注释）。
+判据阈值见下方常量，均已在合成样本上实测过。
+
+⭐ **与姊妹 KB 的版本必须保持一致**（共享脚本，§陷阱 45 的「变化行是否全部
+与本次改动相关」判据）—— 两边跑的是同一个 proxy，同一个坏脚本等于没修。
 """
 
 import argparse
@@ -63,6 +66,10 @@ MIN_SECTION_BODY_LINES = 2
 INTERLEAVE_RATIO = 0.60
 # 参与重叠统计的行长度下限（过滤装饰线 / 表格分隔）
 MIN_OVERLAP_LINE_LEN = 12
+# 孤儿体检测用的「固定长度前缀签名」行数。
+# ⚠️ 不能用「整段正文」当签名：最后一节的正文延伸到 EOF，孤块若是它的复制体
+#    会被吸进自己 => 签名改变 => 反而漏报（2026-11-15 实测踩到）。
+SIG_LINES = 8
 
 
 def _fenced_line_mask(lines):
@@ -129,6 +136,9 @@ def analyze(text):
         end = headings[k + 1][0] if k + 1 < len(headings) else len(lines)
         spans.append((start, end, title))
 
+    # 全文件的非空行序列（孤儿体签名要在它上面滑动查找）
+    nonempty = [ln.strip() for ln in lines if ln.strip()]
+
     # --- 2) 两节正文整体相同（只比正文，不含标题行 ——
     #        标题不同正是「同一段正文被复制到两节」的标志） ---
     body_hash = {}
@@ -171,13 +181,44 @@ def analyze(text):
                      f"-- bodies look interleaved")
                 )
 
-    # --- 5) 孤儿块：子标题数远多于 section 数 ---
+    # --- 5) 孤儿块：section 数远少于子标题数 ---
     if n_sub > len(headings) * 3:
         problems.append(
             ("SUSPECT_ORPHAN",
              f"{n_sub} sub-headings vs {len(headings)} sections "
-             f"-- check for a body without its own heading")
+             "-- check for a body without its own heading")
         )
+
+    # --- 6) 孤儿体：某一节的正文在文件里出现了第二份（无自己的标题） ---
+    #
+    # ⚠️ 这条判据**不能**被上面的 #2 (DUPLICATE_SECTION, 整段 sha256) 替代：
+    # 孤儿体的典型形态是「把最后一节的正文**再抄一份**追加到文件末尾」，
+    # 于是**最后一节的正文区间会同时包含原件和副本** => 它的 sha256 唯一
+    # => #2 看不到重复 => 孤儿体**漏检**。
+    # => 必须用「固定长度前缀签名」在全文件的非空行序列里滑动查找（§陷阱 31）。
+    #
+    # ⚠️ 为什么不用「整段正文」当签名：最后一节的正文延伸到 EOF，孤块若是它的
+    #    复制体会被**吸进自己** => 签名改变 => 反而漏报（2026-11-15 实测踩到）。
+    sig_owner = {}
+    for start, end, title in spans:
+        body = [ln.strip() for ln in lines[start + 1:end] if ln.strip()]
+        if len(body) < SIG_LINES:
+            continue
+        sig = tuple(body[:SIG_LINES])
+        hits = 0
+        for j in range(len(nonempty) - SIG_LINES + 1):
+            if tuple(nonempty[j:j + SIG_LINES]) == sig:
+                hits += 1
+        if hits > 1:
+            problems.append(
+                ("DUPLICATE_BLOCK",
+                 f"section body of {title!r} appears {hits} times (orphan/duplicate copy)"))
+        sig_owner.setdefault(sig, []).append(title)
+    for sig, owners in sig_owner.items():
+        if len(owners) > 1:
+            problems.append(
+                ("DUPLICATE_SECTION",
+                 f"{len(owners)} sections share the same body prefix {sig[:2]}"))
 
     return problems, len(headings), n_sub, lines
 
